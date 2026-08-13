@@ -1,0 +1,8 @@
+{
+  "runtime": "codex-subagent",
+  "model": "gpt-5.6-terra",
+  "reasoningEffort": "low",
+  "context": "fresh",
+  "tools": []
+}
+

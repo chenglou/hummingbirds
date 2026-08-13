@@ -1,0 +1,57 @@
+{
+  "ok": true,
+  "configuration": {
+    "model": "gpt-5.6-luna",
+    "reasoningEffort": "low",
+    "serviceTier": "fast",
+    "concurrency": 5
+  },
+  "virtualAgents": 24,
+  "touchedAgents": 23,
+  "untouchedAgents": ["astro-ephemeris"],
+  "requests": 8,
+  "correctAnswers": 8,
+  "committedTurns": 46,
+  "attempts": 47,
+  "rejectedAttempts": 1,
+  "idealRouteMatches": 6,
+  "performance": {
+    "setupToDrainMs": 99704,
+    "workerPoolWallMs": 97032,
+    "maxObservedConcurrency": 5,
+    "totalModelMs": 328450,
+    "reportedTokens": 267779,
+    "attemptDurationMs": {
+      "mean": 6988,
+      "median": 6465,
+      "p90": 9272,
+      "max": 11081
+    },
+    "queueWaitMs": {
+      "mean": 3731,
+      "median": 3444,
+      "p90": 6762,
+      "max": 11827
+    }
+  },
+  "routes": {
+    "route-01": ["astro-instruments", "astro-spectra", "astro-weather", "astro-spectra", "astro-instruments"],
+    "route-02": ["astro-optics", "heritage-acoustics", "heritage-oral", "civic-incidents", "civic-maps", "civic-grid", "civic-maps", "civic-incidents", "heritage-oral", "heritage-acoustics", "astro-optics"],
+    "route-03": ["astro-ops", "civic-transit", "civic-maps", "civic-transit", "astro-ops"],
+    "route-04": ["astro-spectra", "heritage-catalog", "heritage-language", "heritage-catalog", "astro-spectra"],
+    "route-05": ["civic-procurement", "bio-soils", "bio-pollinators", "bio-soils", "civic-procurement"],
+    "route-06": ["bio-water", "bio-conservation", "bio-field", "bio-conservation", "bio-water"],
+    "route-07": ["bio-plants", "heritage-preservation", "heritage-provenance", "heritage-preservation", "bio-plants"],
+    "route-08": ["civic-permits", "civic-incidents", "heritage-oral", "civic-incidents", "civic-permits"]
+  },
+  "answers": {
+    "route-01": "04:17 LST",
+    "route-02": "Glass Harbor",
+    "route-03": "Amber Triangle",
+    "route-04": "Silver Orchard",
+    "route-05": "Mallow-47",
+    "route-06": "Kestrel Nine",
+    "route-07": "Violet Anvil",
+    "route-08": "River Without Bells"
+  }
+}

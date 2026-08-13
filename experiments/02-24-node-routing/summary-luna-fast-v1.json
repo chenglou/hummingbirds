@@ -1,0 +1,12 @@
+{
+  "ok": false,
+  "model": "gpt-5.6-luna",
+  "reasoningEffort": "low",
+  "serviceTier": "fast",
+  "concurrency": 5,
+  "committedTurns": 49,
+  "successfulRequests": 7,
+  "failedRequest": "route-04",
+  "reason": "The root relayed a found answer back to its callee instead of emitting a final result.",
+  "preservedAt": "runs/02-24-node-routing-luna-fast-v1"
+}

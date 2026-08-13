@@ -1,0 +1,10 @@
+{
+  "status": "stopped",
+  "committedTurns": 40,
+  "completedRequests": 7,
+  "totalRequests": 8,
+  "touchedAgents": 23,
+  "reason": "The intended civic-incidents to heritage-oral edge was missing. Fallback exposed a repeated prompt ambiguity: four fresh workers omitted kind from the same outgoing question body.",
+  "trace": "The main trace contains all 40 committed turns. A supplementary, non-hash-verified sidecar retains eight semantic discards and one interrupted dispatch.",
+  "nextRevision": 3
+}

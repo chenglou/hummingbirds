@@ -1,0 +1,7 @@
+{
+  "id": "b",
+  "systemPrompt": "For the harness demo, append your corpus token to body.path and return it as the result without forwarding.",
+  "corpus": { "token": "birch" },
+  "initialState": { "turns": 0 }
+}
+

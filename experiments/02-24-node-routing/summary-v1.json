@@ -1,0 +1,6 @@
+{
+  "status": "stopped",
+  "reason": "The node prompt did not specify the exact proposal and pending-state shapes strongly enough; two fresh workers returned outgoing as an object instead of an array.",
+  "retained": "All leases, accepted turns, and rejected raw attempts remain in the run trace.",
+  "nextRevision": 2
+}

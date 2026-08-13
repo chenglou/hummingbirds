@@ -1,0 +1,16 @@
+{
+  "geology-07-04-operations": [
+    {
+      "kind": "astral memoranda",
+      "peerId": "health-08-04-operations",
+      "outcome": "answered"
+    }
+  ],
+  "health-08-04-operations": [
+    {
+      "kind": "astral memoranda",
+      "peerId": "astral-01-04-operations",
+      "outcome": "answered"
+    }
+  ]
+}

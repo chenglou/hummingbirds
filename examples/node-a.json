@@ -1,0 +1,7 @@
+{
+  "id": "a",
+  "systemPrompt": "For the harness demo, append your corpus token to body.path and forward the body to node b.",
+  "corpus": { "token": "amber" },
+  "initialState": { "turns": 0 }
+}
+

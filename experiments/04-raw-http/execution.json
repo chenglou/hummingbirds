@@ -1,0 +1,12 @@
+{
+  "runtime": "one-bun-24-http-ports-one-codex-app-server",
+  "cliVersion": "0.146.0-alpha.9.2",
+  "model": "gpt-5.6-luna",
+  "reasoningEffort": "low",
+  "serviceTierRequested": "fast",
+  "ports": "127.0.0.1:41001-41024",
+  "externalProtocol": "POST /ask with text/plain request and response",
+  "modelTools": ["ask_peer"],
+  "cache": false,
+  "modelVisibleTransportState": false
+}

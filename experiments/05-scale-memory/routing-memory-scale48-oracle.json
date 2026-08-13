@@ -1,0 +1,302 @@
+{
+  "geology-07-04-operations": [
+    {
+      "peerId": "health-08-04-operations",
+      "kind": "astral memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "health-08-04-operations",
+      "kind": "health memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "health-08-04-operations": [
+    {
+      "peerId": "astral-01-04-operations",
+      "kind": "astral memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "health-08-05-calibration": [
+    {
+      "peerId": "astral-01-05-calibration",
+      "kind": "ecology memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "astral-01-05-calibration",
+      "kind": "astral memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "astral-01-05-calibration": [
+    {
+      "peerId": "ecology-02-05-calibration",
+      "kind": "ecology memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "astral-01-06-archive": [
+    {
+      "peerId": "ecology-02-06-archive",
+      "kind": "civic memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "ecology-02-06-archive",
+      "kind": "ecology memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "ecology-02-06-archive": [
+    {
+      "peerId": "civic-03-06-archive",
+      "kind": "civic memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "civic-03-01-registry": [
+    {
+      "peerId": "heritage-04-01-registry",
+      "kind": "maritime memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "heritage-04-01-registry",
+      "kind": "heritage memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "heritage-04-01-registry": [
+    {
+      "peerId": "maritime-05-01-registry",
+      "kind": "maritime memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "heritage-04-02-fieldwork": [
+    {
+      "peerId": "maritime-05-02-fieldwork",
+      "kind": "archive memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "maritime-05-02-fieldwork",
+      "kind": "maritime memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "maritime-05-02-fieldwork": [
+    {
+      "peerId": "archive-06-02-fieldwork",
+      "kind": "archive memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "maritime-05-03-analysis": [
+    {
+      "peerId": "archive-06-03-analysis",
+      "kind": "geology memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "archive-06-03-analysis",
+      "kind": "archive memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "archive-06-03-analysis": [
+    {
+      "peerId": "geology-07-03-analysis",
+      "kind": "geology memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "archive-06-04-operations": [
+    {
+      "peerId": "geology-07-04-operations",
+      "kind": "health memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "geology-07-04-operations",
+      "kind": "geology memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "geology-07-05-calibration": [
+    {
+      "peerId": "health-08-05-calibration",
+      "kind": "astral memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "health-08-05-calibration",
+      "kind": "health memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "health-08-06-archive": [
+    {
+      "peerId": "astral-01-06-archive",
+      "kind": "ecology memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "astral-01-06-archive",
+      "kind": "astral memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "ecology-02-01-registry": [
+    {
+      "peerId": "civic-03-01-registry",
+      "kind": "heritage memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "civic-03-01-registry",
+      "kind": "civic memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "civic-03-02-fieldwork": [
+    {
+      "peerId": "heritage-04-02-fieldwork",
+      "kind": "maritime memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "heritage-04-02-fieldwork",
+      "kind": "heritage memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "heritage-04-03-analysis": [
+    {
+      "peerId": "maritime-05-03-analysis",
+      "kind": "archive memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "maritime-05-03-analysis",
+      "kind": "maritime memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "maritime-05-04-operations": [
+    {
+      "peerId": "archive-06-04-operations",
+      "kind": "geology memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "archive-06-04-operations",
+      "kind": "archive memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "archive-06-05-calibration": [
+    {
+      "peerId": "geology-07-05-calibration",
+      "kind": "health memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "geology-07-05-calibration",
+      "kind": "geology memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "geology-07-06-archive": [
+    {
+      "peerId": "health-08-06-archive",
+      "kind": "astral memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "health-08-06-archive",
+      "kind": "health memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "astral-01-01-registry": [
+    {
+      "peerId": "ecology-02-01-registry",
+      "kind": "civic memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "ecology-02-01-registry",
+      "kind": "ecology memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "ecology-02-02-fieldwork": [
+    {
+      "peerId": "civic-03-02-fieldwork",
+      "kind": "heritage memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "civic-03-02-fieldwork",
+      "kind": "civic memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "civic-03-03-analysis": [
+    {
+      "peerId": "heritage-04-03-analysis",
+      "kind": "maritime memoranda",
+      "outcome": "answered"
+    },
+    {
+      "peerId": "heritage-04-03-analysis",
+      "kind": "heritage memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "heritage-04-04-operations": [
+    {
+      "peerId": "maritime-05-04-operations",
+      "kind": "archive memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "maritime-05-05-calibration": [
+    {
+      "peerId": "archive-06-05-calibration",
+      "kind": "geology memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "archive-06-06-archive": [
+    {
+      "peerId": "geology-07-06-archive",
+      "kind": "health memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "health-08-01-registry": [
+    {
+      "peerId": "astral-01-01-registry",
+      "kind": "ecology memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "astral-01-02-fieldwork": [
+    {
+      "peerId": "ecology-02-02-fieldwork",
+      "kind": "civic memoranda",
+      "outcome": "answered"
+    }
+  ],
+  "ecology-02-03-analysis": [
+    {
+      "peerId": "civic-03-03-analysis",
+      "kind": "heritage memoranda",
+      "outcome": "answered"
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "requestId": "route-05",
+  "expectedAnswer": "Mallow-47",
+  "runs": [
+    {
+      "promptWords": 8,
+      "promptPath": "experiments/04-raw-http/prompt-minimal.md",
+      "answerCorrect": false,
+      "durationMs": 51197,
+      "modelTurns": 9,
+      "peerCalls": 13,
+      "rejectedCycles": 5,
+      "runPath": "runs/04-raw-http-minimal-suite-v1-route-05"
+    },
+    {
+      "promptWords": 15,
+      "promptPath": "experiments/04-raw-http/prompt-retry.md",
+      "answerCorrect": true,
+      "durationMs": 51430,
+      "modelTurns": 11,
+      "peerCalls": 18,
+      "rejectedCycles": 8,
+      "runPath": "runs/04-raw-http-retry-route-05-v1"
+    },
+    {
+      "promptWords": 52,
+      "promptPath": "experiments/04-raw-http/prompt.md",
+      "answerCorrect": true,
+      "durationMs": 102849,
+      "modelTurns": 19,
+      "peerCalls": 32,
+      "rejectedCycles": 14,
+      "runPath": "runs/04-raw-http-guided-route-05-v1"
+    },
+    {
+      "promptWords": 20,
+      "promptPath": "experiments/04-raw-http/prompt-stop.md",
+      "answerCorrect": false,
+      "durationMs": 163254,
+      "modelTurns": 38,
+      "peerCalls": 102,
+      "rejectedCycles": 33,
+      "runPath": "runs/04-raw-http-stop-route-05-v1"
+    },
+    {
+      "promptWords": 26,
+      "promptPath": "experiments/04-raw-http/prompt-stop-v2.md",
+      "answerCorrect": true,
+      "durationMs": 159027,
+      "modelTurns": 26,
+      "peerCalls": 47,
+      "rejectedCycles": 22,
+      "runPath": "runs/04-raw-http-stop-v2-route-05-v1"
+    }
+  ]
+}

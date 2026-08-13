@@ -1,0 +1,26 @@
+{
+  "run": "runs/03-resident-single-question-resident-v1",
+  "variant": "24 resident app-server threads",
+  "model": "gpt-5.6-luna",
+  "reasoningEffort": "low",
+  "serviceTierRequested": "fast",
+  "effectiveThreadServiceTier": "priority",
+  "virtualAgents": 24,
+  "residentThreadsLoadedBefore": 24,
+  "residentThreadsLoadedAfter": 24,
+  "threadStartDurationMs": 1335,
+  "warmupDurationMs": 5200,
+  "timedQuestionDurationMs": 16994,
+  "committedTurns": 5,
+  "rejectedAttempts": 0,
+  "toolCalls": 0,
+  "route": [
+    "astro-ops",
+    "civic-transit",
+    "civic-maps",
+    "civic-transit",
+    "astro-ops"
+  ],
+  "answer": "Amber Triangle",
+  "correct": true
+}
