@@ -1,20 +1,21 @@
 {
-  "name": "net-meta-harness",
+  "name": "agent-network-harness",
   "private": true,
   "type": "module",
   "scripts": {
     "net": "bun run src/cli.ts",
-    "codex-pool": "bun run src/codex-pool.ts",
-    "resident-pool": "bun run src/resident-pool.ts",
     "test": "bun test",
-    "typecheck": "bun tsc --noEmit && bun tsc --noEmit -p tsconfig.experiments.json",
-    "lint": "bun oxlint --deny-warnings src tests",
-    "check": "bun run typecheck && bun run lint && bun test"
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware src tests",
+    "knip": "knip",
+    "check": "tsc --noEmit && oxlint --type-aware src tests && bun test"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@typescript/native": "npm:@typescript/native-preview@latest",
+    "@typescript/native": "npm:typescript@7.0.2",
+    "knip": "latest",
     "oxlint": "latest",
-    "typescript": "latest"
+    "oxlint-tsgolint": "latest",
+    "typescript": "5.9.3"
   }
 }

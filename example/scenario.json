@@ -1,0 +1,8 @@
+{
+  "entry": "a",
+  "nodes": [
+    { "id": "a", "knows": ["b"] },
+    { "id": "b", "knows": ["c"] },
+    { "id": "c", "knows": [] }
+  ]
+}

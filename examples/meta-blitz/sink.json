@@ -1,7 +1,0 @@
-{
-  "id": "sink",
-  "systemPrompt": "This is the terminal step of a fixed harness test. Increment state.turns, send no messages, and return result {paths: incoming.body.paths, sinkToken: corpus.token}.",
-  "corpus": { "token": "ORBIT-4" },
-  "initialState": { "turns": 0 }
-}
-

@@ -1,8 +1,0 @@
-{
-  "status": "failed",
-  "reason": "The final human-facing result omitted threadId",
-  "answer": "Kestrel Nine",
-  "route": ["a", "b", "c", "b", "a"],
-  "committedTurns": 5,
-  "promptRevision": 1
-}

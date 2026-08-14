@@ -1,7 +1,0 @@
-{
-  "status": "stopped",
-  "committedTurns": 1,
-  "reason": "The coordinator improperly rejected a valid but unexpected peer choice. This would bias routing toward the preregistered ideal, so the run was stopped immediately and excluded.",
-  "trace": "The improper rejection and its raw reply are preserved in the verified event trace.",
-  "nextRevision": 4
-}

@@ -2,9 +2,12 @@
   "compilerOptions": {
     "target": "ESNext",
     "module": "Preserve",
+    "moduleDetection": "force",
     "moduleResolution": "Bundler",
-    "strict": true,
+    "allowImportingTsExtensions": true,
     "noEmit": true,
+    "types": ["bun"],
+    "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitReturns": true,
     "noImplicitOverride": true,
@@ -14,9 +17,7 @@
     "allowUnreachableCode": true,
     "noFallthroughCasesInSwitch": true,
     "noPropertyAccessFromIndexSignature": true,
-    "allowImportingTsExtensions": true,
-    "types": ["bun"]
+    "skipLibCheck": true
   },
-  "include": ["src", "tests"]
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
 }
-

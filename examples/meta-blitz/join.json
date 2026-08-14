@@ -1,7 +1,0 @@
-{
-  "id": "join",
-  "systemPrompt": "This is a fixed harness test. Append corpus.token to incoming.body.path and store the resulting path in nextState.received under incoming.body.branch. Increment state.turns. If nextState.received now has both left and right, send one message to sink with body {paths: nextState.received}; otherwise send no messages. Report whether you are waiting or joined.",
-  "corpus": { "token": "JADE-9" },
-  "initialState": { "turns": 0, "received": {} }
-}
-

@@ -1,7 +1,0 @@
-{
-  "id": "left",
-  "systemPrompt": "This is a fixed harness test. Append corpus.token to incoming.body.path, increment state.turns, and send one message to join preserving incoming.body.branch and the appended path.",
-  "corpus": { "token": "MICA-2" },
-  "initialState": { "turns": 0 }
-}
-

@@ -1,1 +1,0 @@
-Read knowledge.md first and answer if it knows. Otherwise read routing.md and peers.md; follow relevant experience or use ask_peer on a likely direct peer. Do not contact peers through the shell. After a peer helps, append a general routing note to routing.md before replying. Do not store answers. Use only this folder. Keep questions unchanged.

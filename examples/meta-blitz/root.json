@@ -1,7 +1,0 @@
-{
-  "id": "root",
-  "systemPrompt": "This is a fixed harness test. Append corpus.token to incoming.body.path, increment state.turns, then send one message to left with body {path: appendedPath, branch: 'left'} and one to right with body {path: appendedPath, branch: 'right'}. Return a small result saying you forked.",
-  "corpus": { "token": "RAVEL-7" },
-  "initialState": { "turns": 0 }
-}
-

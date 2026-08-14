@@ -1,0 +1,56 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "oxc", "promise"],
+  "options": {
+    "denyWarnings": true
+  },
+  "rules": {
+    "typescript/prefer-ts-expect-error": "error",
+    "typescript/no-unnecessary-type-assertion": "error",
+    "no-unreachable": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-unsafe-assignment": "error",
+    "typescript/no-unsafe-argument": "error",
+    "typescript/no-unsafe-call": "error",
+    "typescript/no-unsafe-return": "error",
+    "prefer-promise-reject-errors": "error",
+    "promise/no-callback-in-promise": "error",
+    "typescript/no-unsafe-member-access": "error",
+    "typescript/prefer-nullish-coalescing": [
+      "error",
+      {
+        "ignorePrimitives": {
+          "boolean": true
+        }
+      }
+    ],
+    "typescript/strict-boolean-expressions": [
+      "error",
+      {
+        "allowNullableBoolean": true,
+        "allowString": false
+      }
+    ],
+    "typescript/switch-exhaustiveness-check": [
+      "error",
+      {
+        "allowDefaultCaseForExhaustiveSwitch": false,
+        "considerDefaultExhaustiveForUnions": true,
+        "requireDefaultForNonUnion": true
+      }
+    ],
+    "typescript/no-unnecessary-condition": [
+      "error",
+      {
+        "allowConstantLoopConditions": true
+      }
+    ],
+    "no-unused-expressions": [
+      "error",
+      {
+        "allowTernary": true,
+        "allowShortCircuit": true
+      }
+    ]
+  }
+}
