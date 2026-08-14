@@ -1,9 +1,9 @@
 {
-  "name": "agent-network-harness",
+  "name": "hummingbirds",
   "private": true,
   "type": "module",
   "scripts": {
-    "net": "bun run src/cli.ts",
+    "hummingbirds": "bun run src/cli.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --type-aware src tests",

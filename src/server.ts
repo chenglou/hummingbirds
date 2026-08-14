@@ -1,8 +1,8 @@
 import { answerQuestion } from "./agent.ts"
 import { headers, parsePath } from "./protocol.ts"
 
-const nodeId = requireEnvironment("NET_NODE_ID")
-const port = parsePort(Bun.env["NET_PORT"] ?? "0")
+const nodeId = requireEnvironment("HUMMINGBIRDS_NODE_ID")
+const port = parsePort(Bun.env["HUMMINGBIRDS_PORT"] ?? "0")
 let address = ""
 
 const server = Bun.serve({
@@ -68,7 +68,7 @@ function requireEnvironment(name: string): string {
 function parsePort(value: string): number {
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65_535) {
-    throw new Error(`Invalid NET_PORT: ${value}`)
+    throw new Error(`Invalid HUMMINGBIRDS_PORT: ${value}`)
   }
   return parsed
 }

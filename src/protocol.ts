@@ -1,9 +1,9 @@
 export const headers = {
-  callerId: "x-net-caller-id",
-  invocationId: "x-net-invocation-id",
-  parentInvocationId: "x-net-parent-invocation-id",
-  path: "x-net-path",
-  requestId: "x-net-request-id",
+  callerId: "x-hummingbirds-caller-id",
+  invocationId: "x-hummingbirds-invocation-id",
+  parentInvocationId: "x-hummingbirds-parent-invocation-id",
+  path: "x-hummingbirds-path",
+  requestId: "x-hummingbirds-request-id",
 } as const
 
 export type JsonObject = Record<string, unknown>

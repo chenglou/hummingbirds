@@ -215,8 +215,8 @@ function spawnNode(
     env: {
       ...process.env,
       ...environment,
-      NET_NODE_ID: id,
-      NET_PORT: "0",
+      HUMMINGBIRDS_NODE_ID: id,
+      HUMMINGBIRDS_PORT: "0",
     },
     stdin: "ignore",
     stdout: "pipe",

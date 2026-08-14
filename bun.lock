@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "net-meta-harness",
+      "name": "hummingbirds",
       "devDependencies": {
         "@types/bun": "latest",
         "@typescript/native": "npm:typescript@7.0.2",

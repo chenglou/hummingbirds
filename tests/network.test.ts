@@ -29,7 +29,7 @@ afterAll(async () => {
   )
 })
 
-describe("agent network", () => {
+describe("Hummingbirds", () => {
   test("learns and uses a transitive route across independent processes", async () => {
     const trainingQuestion =
       "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for tideglass trial Nacre-A?"
@@ -38,7 +38,7 @@ describe("agent network", () => {
     const trainingRequestId = "request-training"
     const probeRequestId = "request-probe"
     const fake = startFakeResponsesApi()
-    const temporaryDirectory = await mkdtemp(join(tmpdir(), "net-harness-"))
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "hummingbirds-"))
     temporaryDirectories.push(temporaryDirectory)
     const runDirectory = join(temporaryDirectory, "run")
     let network: RunningNetwork | null = null

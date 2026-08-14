@@ -1,4 +1,4 @@
-# Agent network harness
+# Hummingbirds
 
 A small prototype of questions moving through a network of AI nodes. Every node is an independent Bun process with its own port and folder. The model—not the harness—chooses whom to ask and what routing experience to retain.
 
@@ -7,14 +7,14 @@ A small prototype of questions moving through a network of AI nodes. Every node 
 ```sh
 bun install
 export OPENAI_API_KEY=...
-bun run net run example/scenario.json \
+bun run hummingbirds run example/scenario.json \
   "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for tideglass trial Nacre-A?"
 ```
 
 The raw answer goes to stdout. The run directory and request ID go to stderr. Inspect the complete cross-node trace afterward:
 
 ```sh
-bun run net inspect runs/<run> <request-id>
+bun run hummingbirds inspect runs/<run> <request-id>
 ```
 
 Pass several quoted questions to `run` to ask them sequentially on the same live network. Later questions see the `nodes.md` learned from earlier ones.
