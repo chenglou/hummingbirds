@@ -86,9 +86,10 @@ export async function startNetwork(
       const directory = join(absoluteRunDirectory, seed.id)
       await mkdir(directory)
       await Promise.all([
-        copyFile(join(sourceDirectory, "node.ts"), join(directory, "node.ts")),
+        copyFile(join(sourceDirectory, "agent.ts"), join(directory, "agent.ts")),
         copyFile(join(sourceDirectory, "protocol.ts"), join(directory, "protocol.ts")),
         copyFile(join(sourceDirectory, "prompt.md"), join(directory, "prompt.md")),
+        copyFile(join(sourceDirectory, "server.ts"), join(directory, "server.ts")),
         copyFile(join(scenarioDirectory, seed.id, "knowledge.md"), join(directory, "knowledge.md")),
         writeFile(join(directory, "nodes.md"), "# Known nodes\n"),
         writeFile(join(directory, "events.jsonl"), ""),
@@ -209,7 +210,7 @@ function spawnNode(
   environment: Record<string, string>,
 ): SpawnedNode {
   const child = Bun.spawn({
-    cmd: [process.execPath, "run", "node.ts"],
+    cmd: [process.execPath, "run", "server.ts"],
     cwd: directory,
     env: {
       ...process.env,

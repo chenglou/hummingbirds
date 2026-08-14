@@ -2,12 +2,26 @@ import { appendFile } from "node:fs/promises"
 
 import {
   headers,
-  parsePath,
   requireRecord,
   requireString,
   type JsonObject,
   type TraceEvent,
 } from "./protocol.ts"
+
+export type AgentRequest = {
+  address: string
+  callerId: string
+  invocationId: string
+  nodeId: string
+  parentInvocationId: string | null
+  path: string[]
+  requestId: string
+}
+
+type AgentReply = {
+  body: string
+  status: number
+}
 
 type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max"
 
@@ -30,25 +44,11 @@ type FunctionCall = {
   name: "ask_node" | "replace_nodes"
 }
 
-type TraceContext = {
-  invocationId: string
-  parentInvocationId: string | null
-  requestId: string
-}
-
-type RequestContext = TraceContext & {
-  callerId: string
-  path: string[]
-}
-
-const nodeId = requireEnvironment("NET_NODE_ID")
 const apiKey = requireEnvironment("OPENAI_API_KEY")
 const apiBaseUrl = Bun.env["OPENAI_BASE_URL"] ?? "https://api.openai.com/v1"
 const model = Bun.env["OPENAI_MODEL"] ?? "gpt-5.6-luna"
 const reasoningEffort = parseReasoningEffort(Bun.env["OPENAI_REASONING_EFFORT"])
-const port = parsePort(Bun.env["NET_PORT"] ?? "0")
 let sequence = 0
-let address = ""
 
 const tools = [
   {
@@ -92,109 +92,77 @@ const tools = [
   { type: "web_search" },
 ]
 
-const server = Bun.serve({
-  hostname: "127.0.0.1",
-  port,
-  fetch: handleHttpRequest,
-})
-
-address = `http://127.0.0.1:${server.port}/ask`
-console.log(JSON.stringify({ id: nodeId, pid: process.pid, url: address }))
-
-async function handleHttpRequest(request: Request): Promise<Response> {
-  const url = new URL(request.url)
-  if (url.pathname !== "/ask") return new Response("Not found", { status: 404 })
-  if (request.method !== "POST") return new Response("POST a plain-text question", { status: 405 })
-
-  const requestId = request.headers.get(headers.requestId) ?? crypto.randomUUID()
-  const invocationId = request.headers.get(headers.invocationId) ?? crypto.randomUUID()
-  const parentInvocationId = request.headers.get(headers.parentInvocationId)
-  const callerId = request.headers.get(headers.callerId) ?? "human"
-  const question = await request.text()
+export async function answerQuestion(
+  question: string,
+  request: AgentRequest,
+): Promise<AgentReply> {
   const startedAt = performance.now()
-
-  let path: string[]
-  try {
-    path = parsePath(request.headers.get(headers.path))
-  } catch (error) {
-    return textResponse(errorMessage(error), 400, requestId, invocationId)
-  }
-
-  const context: RequestContext = {
-    callerId,
-    invocationId,
-    parentInvocationId,
-    path: [...path, nodeId],
-    requestId,
-  }
-
   await record({
-    ...eventBase(context),
-    callerId,
+    ...eventBase(request),
+    callerId: request.callerId,
     kind: "request_received",
-    path,
+    path: request.path,
     question,
   })
 
-  if (path.includes(nodeId)) {
+  if (request.path.includes(request.nodeId)) {
     await record({
-      ...eventBase(context),
-      callerId,
+      ...eventBase(request),
+      callerId: request.callerId,
       kind: "cycle_rejected",
-      path,
+      path: request.path,
       question,
     })
-    return textResponse(`Cycle rejected at ${nodeId}.`, 409, requestId, invocationId)
+    return { body: `Cycle rejected at ${request.nodeId}.`, status: 409 }
   }
 
+  const context = { ...request, path: [...request.path, request.nodeId] }
   try {
     const [prompt, knowledge, nodes] = await Promise.all([
       Bun.file("prompt.md").text(),
       Bun.file("knowledge.md").text(),
       Bun.file("nodes.md").text(),
     ])
-    const instructions = renderInstructions(prompt, knowledge, nodes, context)
-    const result = await runAgent(question, instructions, context)
-
+    const result = await runAgent(
+      question,
+      renderInstructions(prompt, knowledge, nodes, context),
+      context,
+    )
     if (!result.ok) {
-      const status = 502
       await record({
         ...eventBase(context),
         durationMs: performance.now() - startedAt,
         error: result.error,
         kind: "request_failed",
-        status,
+        status: 502,
       })
-      return textResponse(result.error, status, requestId, invocationId)
+      return { body: result.error, status: 502 }
     }
-
-    const status = 200
     await record({
       ...eventBase(context),
       answer: result.answer,
       durationMs: performance.now() - startedAt,
       kind: "request_completed",
-      status,
+      status: 200,
     })
-    return textResponse(result.answer, status, requestId, invocationId)
+    return { body: result.answer, status: 200 }
   } catch (error) {
     const message = errorMessage(error)
-    const status = 500
     await record({
       ...eventBase(context),
       durationMs: performance.now() - startedAt,
       error: message,
       kind: "request_failed",
-      status,
+      status: 500,
     })
-    return textResponse(message, status, requestId, invocationId)
+    return { body: message, status: 500 }
   }
 }
 
 async function runAgent(
   question: string,
   instructions: string,
-  context: RequestContext,
+  context: AgentRequest,
 ): Promise<AgentResult> {
   const input: JsonObject[] = [{ role: "user", content: question }]
 
@@ -209,16 +177,14 @@ async function runAgent(
       if (answer.length === 0) return { error: "The model returned no answer.", ok: false }
       return { answer, ok: true }
     }
-
-    const outputs = await executeFunctions(calls, context)
-    input.push(...outputs)
+    input.push(...(await executeFunctions(calls, context)))
   }
 }
 
 async function callModel(
   instructions: string,
   input: JsonObject[],
-  context: TraceContext,
+  context: AgentRequest,
   apiCall: number,
 ): Promise<ApiResult> {
   const startedAt = performance.now()
@@ -244,7 +210,6 @@ async function callModel(
       body: JSON.stringify(requestBody),
     })
     responseBody = await response.text()
-
     if (!response.ok) {
       const error = `OpenAI HTTP ${response.status}: ${responseBody}`
       await record({
@@ -286,7 +251,7 @@ async function callModel(
 
 async function executeFunctions(
   calls: FunctionCall[],
-  context: RequestContext,
+  context: AgentRequest,
 ): Promise<JsonObject[]> {
   const outputs: Array<JsonObject | null> = calls.map(() => null)
   const asks: Array<{ call: FunctionCall; index: number }> = []
@@ -312,11 +277,10 @@ async function executeFunctions(
 
 async function executeFunction(
   call: FunctionCall,
-  context: RequestContext,
+  context: AgentRequest,
 ): Promise<JsonObject> {
   const argumentsRecord = requireRecord(parseJson(call.arguments), `${call.name} arguments`)
   let output: string
-
   switch (call.name) {
     case "ask_node":
       output = await askNode(
@@ -330,19 +294,14 @@ async function executeFunction(
       output = await replaceNodes(requireString(argumentsRecord, "content"), context)
       break
   }
-
-  return {
-    type: "function_call_output",
-    call_id: call.callId,
-    output,
-  }
+  return { type: "function_call_output", call_id: call.callId, output }
 }
 
 async function askNode(
   callId: string,
   peerAddress: string,
   question: string,
-  context: RequestContext,
+  context: AgentRequest,
 ): Promise<string> {
   const startedAt = performance.now()
   await record({
@@ -358,7 +317,7 @@ async function askNode(
       method: "POST",
       headers: {
         "content-type": "text/plain; charset=utf-8",
-        [headers.callerId]: nodeId,
+        [headers.callerId]: context.nodeId,
         [headers.invocationId]: callId,
         [headers.parentInvocationId]: context.invocationId,
         [headers.path]: JSON.stringify(context.path),
@@ -391,7 +350,7 @@ async function askNode(
   }
 }
 
-async function replaceNodes(content: string, context: TraceContext): Promise<string> {
+async function replaceNodes(content: string, context: AgentRequest): Promise<string> {
   const before = await Bun.file("nodes.md").text()
   await Bun.write("nodes.md", content)
   await record({
@@ -451,9 +410,9 @@ function renderInstructions(
   prompt: string,
   knowledge: string,
   nodes: string,
-  context: RequestContext,
+  context: AgentRequest,
 ): string {
-  return `${prompt.replaceAll("[id]", nodeId).replaceAll("[address]", address)}
+  return `${prompt.replaceAll("[id]", context.nodeId).replaceAll("[address]", context.address)}
 
 Incoming request ID: ${context.requestId}
 Immediate caller ID: ${context.callerId}
@@ -467,11 +426,11 @@ Current nodes.md:
 ${nodes}`
 }
 
-function eventBase(context: TraceContext): Omit<TraceEvent, "kind"> {
+function eventBase(context: AgentRequest): Omit<TraceEvent, "kind"> {
   return {
     at: performance.timeOrigin + performance.now(),
     invocationId: context.invocationId,
-    nodeId,
+    nodeId: context.nodeId,
     parentInvocationId: context.parentInvocationId,
     pid: process.pid,
     requestId: context.requestId,
@@ -483,22 +442,6 @@ async function record(event: TraceEvent): Promise<void> {
   await appendFile("events.jsonl", `${JSON.stringify(event)}\n`)
 }
 
-function textResponse(
-  body: string,
-  status: number,
-  requestId: string,
-  invocationId: string,
-): Response {
-  return new Response(body, {
-    status,
-    headers: {
-      "content-type": "text/plain; charset=utf-8",
-      [headers.invocationId]: invocationId,
-      [headers.requestId]: requestId,
-    },
-  })
-}
-
 function parseJson(value: string): unknown {
   return JSON.parse(value)
 }
@@ -507,14 +450,6 @@ function requireEnvironment(name: string): string {
   const value = Bun.env[name]
   if (value === undefined || value.length === 0) throw new Error(`${name} is required`)
   return value
-}
-
-function parsePort(value: string): number {
-  const parsed = Number(value)
-  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65_535) {
-    throw new Error(`Invalid NET_PORT: ${value}`)
-  }
-  return parsed
 }
 
 function parseReasoningEffort(value: string | undefined): ReasoningEffort {

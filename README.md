@@ -26,13 +26,16 @@ The default is `gpt-5.6-luna` with low reasoning. Override it with `OPENAI_MODEL
 Each runtime node contains:
 
 ```text
-node.ts
+server.ts
+agent.ts
 protocol.ts
 prompt.md
 knowledge.md
 nodes.md
 events.jsonl
 ```
+
+`server.ts` only exposes `POST /ask`: plain text in, plain text out. `agent.ts` implements answering, forwarding, routing-memory updates, and trace recording.
 
 `knowledge.md` is its private corpus. `nodes.md` is its only routing memory. A model may call two local capabilities: send a raw question to an address, or replace its own `nodes.md`. Web search is also available. Answers remain plain text and carry useful contributor IDs and addresses so a caller can learn a transitive route.
 

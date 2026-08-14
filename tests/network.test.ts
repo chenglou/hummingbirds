@@ -55,8 +55,8 @@ describe("agent network", () => {
       const c = findNode(network, "c")
       expect(new Set(network.nodes.map((node) => node.pid)).size).toBe(3)
       expect(new Set(network.nodes.map((node) => node.url)).size).toBe(3)
-      expect(await readFile(join(a.directory, "node.ts"), "utf8")).toBe(
-        await readFile(resolve("src/node.ts"), "utf8"),
+      expect(await readFile(join(a.directory, "server.ts"), "utf8")).toBe(
+        await readFile(resolve("src/server.ts"), "utf8"),
       )
       expect(await readFile(join(a.directory, "prompt.md"), "utf8")).toBe(
         await readFile(resolve("src/prompt.md"), "utf8"),
