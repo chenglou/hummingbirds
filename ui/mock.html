@@ -1,0 +1,785 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f2ec">
+    <title>Hummingbirds — mock flock</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --paper: #f4f2ec;
+        --panel: #fbfaf6;
+        --ink: #17201d;
+        --muted: #6c746f;
+        --line: #d7dcd6;
+        --teal: #277b70;
+        --teal-soft: #dcebe6;
+        --amber: #b87932;
+        --rose: #b94c5f;
+      }
+
+      * { box-sizing: border-box; }
+
+      html { min-width: 320px; background: var(--paper); }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        color: var(--ink);
+        background: radial-gradient(circle at 16% 0%, #fff, transparent 30rem), var(--paper);
+        font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      button, textarea { font: inherit; }
+      button { color: inherit; }
+
+      .topbar {
+        display: flex;
+        width: min(1220px, calc(100% - 40px));
+        min-height: 72px;
+        margin: 0 auto;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .brand, .health, .legend, .answer-meta { display: flex; align-items: center; }
+      .brand { gap: 10px; }
+
+      .mark {
+        position: relative;
+        width: 27px;
+        height: 27px;
+      }
+
+      .mark::before,
+      .mark::after {
+        position: absolute;
+        content: "";
+        border-radius: 999px 2px 999px 999px;
+        transform-origin: 100% 100%;
+      }
+
+      .mark::before {
+        inset: 3px 8px 9px 1px;
+        background: var(--teal);
+        transform: rotate(24deg);
+      }
+
+      .mark::after {
+        inset: 9px 1px 2px 11px;
+        background: var(--rose);
+        transform: rotate(-16deg);
+      }
+
+      .brand-name {
+        font: 600 21px/1 Georgia, "Times New Roman", serif;
+        letter-spacing: -0.025em;
+      }
+
+      .mock-label {
+        padding: 4px 7px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 9px;
+        font-weight: 750;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+      }
+
+      .health { gap: 12px; }
+      .health-copy { color: var(--muted); font-size: 12px; }
+      .health-copy strong { color: var(--ink); font-weight: 680; }
+
+      .quiet-button {
+        flex: none;
+        min-height: 36px;
+        padding: 0 13px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: rgb(255 255 255 / 48%);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .quiet-button:hover { border-color: #b9c2bb; background: rgb(255 255 255 / 78%); }
+      .quiet-button:focus-visible, .bird:focus-visible, .ask-button:focus-visible, textarea:focus-visible {
+        outline: 3px solid rgb(39 123 112 / 20%);
+        outline-offset: 2px;
+      }
+
+      .shell {
+        display: grid;
+        width: min(1220px, calc(100% - 40px));
+        margin: 0 auto 32px;
+        grid-template-columns: minmax(0, 1fr) 370px;
+        gap: 16px;
+      }
+
+      .panel {
+        overflow: hidden;
+        border: 1px solid rgb(208 214 208 / 92%);
+        border-radius: 20px;
+        background: rgb(251 250 246 / 90%);
+        box-shadow: 0 18px 50px rgb(40 48 43 / 7%);
+      }
+
+      .panel-heading {
+        display: flex;
+        min-height: 67px;
+        padding: 0 22px;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--line);
+      }
+
+      h1, h2, p { margin: 0; }
+      h1 { font-size: 15px; font-weight: 700; letter-spacing: -0.01em; }
+
+      .eyebrow {
+        margin-bottom: 4px;
+        color: var(--muted);
+        font-size: 9px;
+        font-weight: 750;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .legend { gap: 13px; color: var(--muted); font-size: 10px; }
+      .legend-item { display: flex; align-items: center; gap: 6px; }
+      .legend-line { width: 17px; height: 1px; background: #98a29b; }
+      .legend-line.learned { height: 0; border-top: 1px dashed var(--amber); background: transparent; }
+
+      .graph {
+        position: relative;
+        height: min(650px, calc(100vh - 172px));
+        min-height: 500px;
+        overflow: hidden;
+        background-image: radial-gradient(circle, #d1d7d1 0.8px, transparent 0.8px);
+        background-size: 26px 26px;
+      }
+
+      .graph::after {
+        position: absolute;
+        z-index: 0;
+        inset: 0;
+        content: "";
+        pointer-events: none;
+        background: linear-gradient(90deg, var(--panel), transparent 14%, transparent 86%, var(--panel));
+        opacity: 0.5;
+      }
+
+      .edges { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; overflow: visible; }
+
+      .bird {
+        position: absolute;
+        z-index: 2;
+        width: 132px;
+        min-height: 82px;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        text-align: center;
+        cursor: pointer;
+        transform: translate(-50%, -50%);
+      }
+
+      .bird-core {
+        display: grid;
+        position: relative;
+        width: 52px;
+        height: 52px;
+        margin: 0 auto 8px;
+        place-items: center;
+        border: 1px solid #c8cfc9;
+        border-radius: 50%;
+        background: #fffefa;
+        box-shadow: 0 8px 20px rgb(55 64 58 / 9%);
+        font: 650 15px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+        transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+      }
+
+      .bird:hover .bird-core { border-color: #99a69e; transform: translateY(-2px); }
+
+      .bird[data-selected="true"] .bird-core {
+        border-color: var(--teal);
+        box-shadow: 0 0 0 5px var(--teal-soft), 0 10px 22px rgb(39 123 112 / 13%);
+      }
+
+      .bird[data-active="true"] .bird-core { border-color: var(--teal); }
+      .bird[data-pinging="true"] .bird-core { animation: health-ping 650ms ease-out; }
+
+      .status-dot {
+        position: absolute;
+        right: 1px;
+        bottom: 2px;
+        width: 10px;
+        height: 10px;
+        border: 2px solid #fffefa;
+        border-radius: 50%;
+        background: var(--teal);
+      }
+
+      .bird-id { display: block; font-size: 12px; font-weight: 700; }
+
+      .bird-topic {
+        display: block;
+        margin-top: 3px;
+        overflow: hidden;
+        color: var(--muted);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .graph-note {
+        position: absolute;
+        z-index: 3;
+        right: 18px;
+        bottom: 16px;
+        padding: 8px 10px;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        color: var(--muted);
+        background: rgb(251 250 246 / 88%);
+        font-size: 10px;
+        backdrop-filter: blur(7px);
+      }
+
+      .inspector { display: flex; min-height: 0; flex-direction: column; }
+      .bird-summary, .known, .ask-form, .answer { padding-right: 22px; padding-left: 22px; }
+      .bird-summary { padding-top: 21px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+
+      .bird-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+      .bird-title h2 { font: 600 22px/1.1 Georgia, "Times New Roman", serif; letter-spacing: -0.025em; }
+
+      .awake-pill {
+        padding: 5px 8px;
+        border-radius: 999px;
+        color: #1f675b;
+        background: var(--teal-soft);
+        font-size: 9px;
+        font-weight: 800;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .address {
+        display: block;
+        margin-top: 10px;
+        overflow: hidden;
+        color: var(--muted);
+        font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .summary-copy { margin-top: 11px; color: #4e5752; font-size: 12px; line-height: 1.5; }
+
+      .known { padding-top: 15px; padding-bottom: 15px; border-bottom: 1px solid var(--line); }
+      .known-title { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; }
+      .known-list { display: grid; margin-top: 9px; gap: 7px; }
+
+      .known-row {
+        display: grid;
+        grid-template-columns: 24px 1fr;
+        gap: 8px;
+        align-items: baseline;
+        color: #4f5853;
+        font-size: 11px;
+      }
+
+      .known-row code { color: var(--teal); font: 650 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .known-empty { color: var(--muted); font-size: 11px; }
+
+      .ask-form { padding-top: 18px; padding-bottom: 17px; border-bottom: 1px solid var(--line); }
+      label { display: block; margin-bottom: 9px; font-size: 12px; font-weight: 700; }
+
+      textarea {
+        display: block;
+        width: 100%;
+        min-height: 96px;
+        resize: vertical;
+        padding: 12px 13px;
+        border: 1px solid #cdd4ce;
+        border-radius: 12px;
+        color: var(--ink);
+        background: #fffefa;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .ask-row { display: flex; margin-top: 11px; align-items: center; justify-content: space-between; gap: 12px; }
+      .ask-hint { color: var(--muted); font-size: 10px; }
+
+      .ask-button {
+        min-width: 88px;
+        min-height: 38px;
+        padding: 0 15px;
+        border: 0;
+        border-radius: 10px;
+        color: white;
+        background: var(--teal);
+        box-shadow: 0 7px 16px rgb(39 123 112 / 18%);
+        cursor: pointer;
+      }
+
+      .ask-button:hover { background: #206e64; }
+      .ask-button:disabled { color: #858a86; background: #e2e4e0; box-shadow: none; cursor: not-allowed; }
+
+      .answer { min-height: 163px; padding-top: 18px; padding-bottom: 23px; }
+      .answer-meta { justify-content: space-between; gap: 10px; }
+      .route { color: var(--teal); font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .latency { color: var(--muted); font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+      .answer-text {
+        margin-top: 13px;
+        font: 500 19px/1.4 Georgia, "Times New Roman", serif;
+        letter-spacing: -0.015em;
+      }
+
+      .answer-text.waiting { color: var(--muted); font: 400 12px/1.55 Inter, ui-sans-serif, sans-serif; }
+      .answer-detail { margin-top: 10px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+
+      @keyframes health-ping {
+        from { box-shadow: 0 0 0 0 rgb(39 123 112 / 28%); }
+        to { box-shadow: 0 0 0 14px rgb(39 123 112 / 0%); }
+      }
+
+      @media (max-width: 850px) {
+        .shell { grid-template-columns: 1fr; }
+        .graph { height: 500px; min-height: 0; }
+      }
+
+      @media (max-width: 560px) {
+        .topbar, .shell { width: calc(100% - 24px); }
+        .topbar { min-height: 64px; }
+        .mock-label, .health-copy { display: none; }
+        .panel-heading { min-height: 60px; padding: 0 16px; }
+        .legend-item span:last-child { display: none; }
+        .graph { height: 410px; }
+        .bird { width: 92px; }
+        .bird-topic { display: none; }
+        .bird-summary, .known, .ask-form, .answer { padding-right: 17px; padding-left: 17px; }
+        .graph-note { right: 10px; bottom: 10px; }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <span class="brand-name">Hummingbirds</span>
+        <span class="mock-label">mock flock</span>
+      </div>
+      <div class="health">
+        <span class="health-copy"><strong id="awake-count">3 of 3 awake</strong> · <span id="health-age">checked 12s ago</span></span>
+        <button class="quiet-button" type="button" data-action="ping">Ping flock</button>
+      </div>
+    </header>
+
+    <main class="shell">
+      <section class="panel" aria-labelledby="flock-title">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">Discovered through answers</p>
+            <h1 id="flock-title">Known flock</h1>
+          </div>
+          <div class="legend" aria-label="Connection legend">
+            <span class="legend-item"><span class="legend-line"></span><span>known</span></span>
+            <span class="legend-item"><span class="legend-line learned"></span><span>learned</span></span>
+          </div>
+        </div>
+        <div class="graph" id="graph" aria-label="Known bird network">
+          <svg class="edges" id="edges" viewBox="0 0 700 500" preserveAspectRatio="none" aria-hidden="true">
+            <defs>
+              <marker id="arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+                <path d="M 0 0 L 8 4 L 0 8 z" fill="context-stroke"></path>
+              </marker>
+            </defs>
+          </svg>
+          <p class="graph-note">Arrows are addresses remembered by the caller.</p>
+        </div>
+      </section>
+
+      <aside class="panel inspector" aria-label="Selected bird and question">
+        <section class="bird-summary">
+          <p class="eyebrow">Selected entry</p>
+          <div class="bird-title">
+            <h2 id="selected-name">bird a</h2>
+            <span class="awake-pill">awake</span>
+          </div>
+          <code class="address" id="selected-address">http://127.0.0.1:4101/ask</code>
+          <p class="summary-copy" id="selected-summary">A broad first stop that learns where more specific questions should travel.</p>
+        </section>
+
+        <section class="known">
+          <p class="known-title">Known birds</p>
+          <div class="known-list" id="known-list"></div>
+        </section>
+
+        <form class="ask-form" id="ask-form">
+          <label for="question">Ask from <span id="ask-name">bird a</span></label>
+          <textarea id="question" name="question" spellcheck="true">In the pelagic-lichen ledger, what harbor phrase is recorded for tideglass trial Nacre-A?</textarea>
+          <div class="ask-row">
+            <span class="ask-hint">Raw text to <code>/ask</code></span>
+            <button class="ask-button" id="ask-button" type="submit">Ask bird</button>
+          </div>
+        </form>
+
+        <section class="answer" aria-live="polite">
+          <p class="eyebrow">Answer</p>
+          <div class="answer-meta">
+            <span class="route" id="answer-route">No route yet</span>
+            <span class="latency" id="answer-latency"></span>
+          </div>
+          <p class="answer-text waiting" id="answer-text">Ask a bird to see a sample question move through the flock.</p>
+          <p class="answer-detail" id="answer-detail">This is deterministic mock data, not a live network.</p>
+        </section>
+      </aside>
+    </main>
+
+    <script type="module">
+      // A visual fixture only—not a protocol or API contract.
+      const SAMPLE_BIRDS = [
+        {
+          id: "a",
+          x: 122,
+          y: 282,
+          alive: true,
+          topic: "broad questions",
+          address: "http://127.0.0.1:4101/ask",
+          summary: "A broad first stop that learns where more specific questions should travel.",
+          knows: [{ id: "b", note: "Unfamiliar contact; useful results have arrived through it." }],
+        },
+        {
+          id: "b",
+          x: 350,
+          y: 138,
+          alive: true,
+          topic: "archive finding",
+          address: "http://127.0.0.1:4102/ask",
+          summary: "Has been a useful relay for obscure records without needing to know every answer itself.",
+          knows: [{ id: "c", note: "Helped with fictional maritime ledgers." }],
+        },
+        {
+          id: "c",
+          x: 566,
+          y: 326,
+          alive: true,
+          topic: "maritime ledgers",
+          address: "http://127.0.0.1:4103/ask",
+          summary: "Carries a narrow private corpus about fictional tideglass and pelagic-lichen records.",
+          knows: [],
+        },
+      ]
+
+      const ALL_EDGES = [
+        { from: "a", to: "b", learned: false, visible: () => true },
+        { from: "b", to: "c", learned: false, visible: () => true },
+        { from: "a", to: "c", learned: true, visible: () => st.learnedShortcut },
+      ]
+
+      let st = {
+        selectedId: "a",
+        draft: "In the pelagic-lichen ledger, what harbor phrase is recorded for tideglass trial Nacre-A?",
+        activeRoute: [],
+        answer: null,
+        learnedShortcut: false,
+        healthAge: "checked 12s ago",
+        pingUntil: null,
+        request: null,
+        events: { click: null, input: null, submit: false },
+      }
+
+      const domCache = {
+        body: document.body,
+        graph: document.getElementById("graph"),
+        edges: document.getElementById("edges"),
+        awakeCount: document.getElementById("awake-count"),
+        healthAge: document.getElementById("health-age"),
+        selectedName: document.getElementById("selected-name"),
+        selectedAddress: document.getElementById("selected-address"),
+        selectedSummary: document.getElementById("selected-summary"),
+        knownList: document.getElementById("known-list"),
+        askName: document.getElementById("ask-name"),
+        question: document.getElementById("question"),
+        askButton: document.getElementById("ask-button"),
+        answerRoute: document.getElementById("answer-route"),
+        answerLatency: document.getElementById("answer-latency"),
+        answerText: document.getElementById("answer-text"),
+        answerDetail: document.getElementById("answer-detail"),
+        birds: new Map(),
+        edgePaths: [],
+        knownKey: null,
+      }
+
+      const svgNamespace = "http://www.w3.org/2000/svg"
+
+      for (const edge of ALL_EDGES) {
+        const path = document.createElementNS(svgNamespace, "path")
+        path.setAttribute("d", edgePath(findBird(edge.from), findBird(edge.to)))
+        path.setAttribute("fill", "none")
+        path.setAttribute("marker-end", "url(#arrow)")
+        domCache.edges.appendChild(path)
+        domCache.edgePaths.push({ edge, path })
+      }
+
+      for (const bird of SAMPLE_BIRDS) {
+        const button = document.createElement("button")
+        button.className = "bird"
+        button.type = "button"
+        button.dataset.action = "select"
+        button.dataset.id = bird.id
+        button.style.left = `${(bird.x / 700) * 100}%`
+        button.style.top = `${(bird.y / 500) * 100}%`
+        button.setAttribute("aria-label", `Select bird ${bird.id}, ${bird.topic}`)
+
+        const core = document.createElement("span")
+        core.className = "bird-core"
+        core.textContent = bird.id
+        const status = document.createElement("span")
+        status.className = "status-dot"
+        status.setAttribute("aria-hidden", "true")
+        core.appendChild(status)
+
+        const id = document.createElement("span")
+        id.className = "bird-id"
+        id.textContent = `bird ${bird.id}`
+        const topic = document.createElement("span")
+        topic.className = "bird-topic"
+        topic.textContent = bird.topic
+
+        button.append(core, id, topic)
+        domCache.graph.appendChild(button)
+        domCache.birds.set(bird.id, button)
+      }
+
+      let scheduledRaf = null
+
+      function scheduleRender() {
+        if (scheduledRaf !== null) return
+        scheduledRaf = requestAnimationFrame(function renderAndMaybeScheduleAnotherRender(now) {
+          scheduledRaf = null
+          if (render(now)) scheduleRender()
+        })
+      }
+
+      window.addEventListener("resize", scheduleRender)
+      window.addEventListener("click", (event) => {
+        st.events.click = event
+        scheduleRender()
+      })
+      window.addEventListener("input", (event) => {
+        if (event.target === domCache.question) st.events.input = domCache.question.value
+        scheduleRender()
+      })
+      window.addEventListener("submit", (event) => {
+        if (event.target instanceof HTMLFormElement && event.target.id === "ask-form") {
+          event.preventDefault()
+          st.events.submit = true
+          scheduleRender()
+        }
+      })
+
+      function render(now) {
+        const viewportWidth = document.documentElement.clientWidth
+        const viewportHeight = document.documentElement.clientHeight
+
+        let selectedId = st.selectedId
+        let draft = st.events.input ?? st.draft
+        let activeRoute = st.activeRoute
+        let answer = st.answer
+        let learnedShortcut = st.learnedShortcut
+        let healthAge = st.healthAge
+        let pingUntil = st.pingUntil
+        let request = st.request
+
+        const clickTarget = st.events.click?.target
+        if (clickTarget instanceof Element) {
+          const control = clickTarget.closest("[data-action]")
+          if (control instanceof HTMLElement && control.dataset.action === "select") {
+            selectedId = control.dataset.id ?? selectedId
+          }
+          if (control instanceof HTMLElement && control.dataset.action === "ping") {
+            healthAge = "checked just now"
+            pingUntil = now + 700
+          }
+        }
+
+        if (st.events.submit && request === null && draft.trim().length > 0) {
+          const route = routeFor(selectedId, learnedShortcut)
+          request = { entryId: selectedId, route, startedAt: now, completesAt: now + 950 }
+          activeRoute = route
+          answer = null
+        }
+
+        if (request !== null && now >= request.completesAt) {
+          const contributors = request.route.slice(1)
+          answer = {
+            route: request.route,
+            latency: `${((request.completesAt - request.startedAt) / 1000).toFixed(1)}s`,
+            text: "“Silver wakes remember.”",
+            detail: contributors.length === 0
+              ? `Bird ${request.entryId} answered from its own private knowledge.`
+              : `Contributed by ${formatBirdList(contributors)}. Bird ${request.entryId} can remember the useful addresses.`,
+          }
+          if (request.entryId === "a" && request.route.includes("b")) learnedShortcut = true
+          request = null
+        }
+
+        if (pingUntil !== null && now >= pingUntil) pingUntil = null
+        const stillAnimating = request !== null || pingUntil !== null
+        const selected = findBird(selectedId)
+
+        st = {
+          selectedId,
+          draft,
+          activeRoute,
+          answer,
+          learnedShortcut,
+          healthAge,
+          pingUntil,
+          request,
+          events: { click: null, input: null, submit: false },
+        }
+
+        domCache.body.dataset.viewport = viewportWidth < 560 ? "compact" : "full"
+        domCache.body.style.minHeight = `${viewportHeight}px`
+        domCache.awakeCount.textContent = `${SAMPLE_BIRDS.filter((bird) => bird.alive).length} of ${SAMPLE_BIRDS.length} awake`
+        domCache.healthAge.textContent = healthAge
+        domCache.selectedName.textContent = `bird ${selected.id}`
+        domCache.selectedAddress.textContent = selected.address
+        domCache.selectedSummary.textContent = selected.summary
+        domCache.askName.textContent = `bird ${selected.id}`
+        domCache.question.value = draft
+        domCache.askButton.disabled = request !== null
+        domCache.askButton.textContent = request === null ? "Ask bird" : "Asking…"
+
+        const known = knownBy(selected.id, learnedShortcut)
+        const knownKey = `${selected.id}:${learnedShortcut}`
+        if (domCache.knownKey !== knownKey) {
+          domCache.knownList.textContent = ""
+          if (known.length === 0) {
+            const empty = document.createElement("p")
+            empty.className = "known-empty"
+            empty.textContent = "No other birds recorded yet."
+            domCache.knownList.appendChild(empty)
+          } else {
+            for (const item of known) {
+              const row = document.createElement("div")
+              row.className = "known-row"
+              const id = document.createElement("code")
+              id.textContent = item.id
+              const note = document.createElement("span")
+              note.textContent = item.note
+              row.append(id, note)
+              domCache.knownList.appendChild(row)
+            }
+          }
+          domCache.knownKey = knownKey
+        }
+
+        for (const bird of SAMPLE_BIRDS) {
+          const node = domCache.birds.get(bird.id)
+          node.dataset.selected = String(bird.id === selectedId)
+          node.dataset.active = String(activeRoute.includes(bird.id))
+          node.dataset.pinging = String(pingUntil !== null && bird.alive)
+          node.setAttribute("aria-pressed", String(bird.id === selectedId))
+        }
+
+        for (const { edge, path } of domCache.edgePaths) {
+          const active = routeHasEdge(activeRoute, edge.from, edge.to)
+          const related = edge.from === selectedId
+          path.style.display = edge.visible() ? "block" : "none"
+          path.style.stroke = active ? "#277b70" : edge.learned ? "#b87932" : "#98a29b"
+          path.style.strokeWidth = active ? "2.2" : related ? "1.5" : "1"
+          path.style.strokeDasharray = edge.learned && !active ? "5 6" : "none"
+          path.style.opacity = active ? "1" : related ? "0.82" : "0.42"
+        }
+
+        if (request !== null) {
+          domCache.answerRoute.textContent = request.route.join(" → ")
+          domCache.answerLatency.textContent = "thinking"
+          domCache.answerText.className = "answer-text waiting"
+          domCache.answerText.textContent = "The question is moving through the flock…"
+          domCache.answerDetail.textContent = "The selected bird decides whether another bird may help."
+        } else if (answer !== null) {
+          domCache.answerRoute.textContent = answer.route.join(" → ")
+          domCache.answerLatency.textContent = answer.latency
+          domCache.answerText.className = "answer-text"
+          domCache.answerText.textContent = answer.text
+          domCache.answerDetail.textContent = answer.detail
+        } else {
+          domCache.answerRoute.textContent = "No route yet"
+          domCache.answerLatency.textContent = ""
+          domCache.answerText.className = "answer-text waiting"
+          domCache.answerText.textContent = "Ask a bird to see a sample question move through the flock."
+          domCache.answerDetail.textContent = "This is deterministic mock data, not a live network."
+        }
+
+        return stillAnimating
+      }
+
+      function findBird(id) {
+        const bird = SAMPLE_BIRDS.find((candidate) => candidate.id === id)
+        if (bird === undefined) throw new Error(`Unknown bird: ${id}`)
+        return bird
+      }
+
+      function knownBy(id, learnedShortcut) {
+        const known = [...findBird(id).knows]
+        if (id === "a" && learnedShortcut) {
+          known.push({ id: "c", note: "Answered successfully through bird b; now directly callable." })
+        }
+        return known
+      }
+
+      function routeFor(id, learnedShortcut) {
+        if (id === "a") return learnedShortcut ? ["a", "c"] : ["a", "b", "c"]
+        if (id === "b") return ["b", "c"]
+        return ["c"]
+      }
+
+      function edgePath(from, to) {
+        const dx = to.x - from.x
+        const dy = to.y - from.y
+        const length = Math.hypot(dx, dy)
+        const x1 = from.x + (dx / length) * 35
+        const y1 = from.y + (dy / length) * 35
+        const x2 = to.x - (dx / length) * 40
+        const y2 = to.y - (dy / length) * 40
+        return `M ${x1} ${y1} L ${x2} ${y2}`
+      }
+
+      function routeHasEdge(route, from, to) {
+        for (let index = 0; index < route.length - 1; index += 1) {
+          if (route[index] === from && route[index + 1] === to) return true
+        }
+        return false
+      }
+
+      function formatBirdList(ids) {
+        if (ids.length === 1) return `bird ${ids[0]}`
+        return `${ids.slice(0, -1).map((id) => `bird ${id}`).join(", ")} and bird ${ids.at(-1)}`
+      }
+
+      window.__hummingbirdsMockReport = () => ({
+        selectedId: st.selectedId,
+        aliveCount: SAMPLE_BIRDS.filter((bird) => bird.alive).length,
+        asking: st.request !== null,
+        learnedShortcut: st.learnedShortcut,
+        activeRoute: [...st.activeRoute],
+        answer: st.answer?.text ?? null,
+      })
+
+      render(performance.now())
+    </script>
+  </body>
+</html>
