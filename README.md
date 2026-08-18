@@ -23,6 +23,15 @@ Each request starts a fresh, ephemeral `codex exec` process. Codex CLI authentic
 
 For agent-level debugging, set `HUMMINGBIRDS_CODEX_JSON_TRACE=1`. Each node then retains Codex's raw JSONL events, final message, and stderr under `codex-traces/`; `/ask` still returns only the final plain-text answer.
 
+Prompt changes have an opt-in live slow-peer eval. It gives one Luna bird an in-memory peer with a fresh random answer, delays that answer past Codex's tool yield, and rejects duplicate or abandoned calls:
+
+```sh
+bun run eval:slow-peer --run-real-model \
+  --codex /Applications/ChatGPT.app/Contents/Resources/codex
+```
+
+This eval makes real model calls and is deliberately separate from `bun test`.
+
 ## The boundary
 
 Each runtime node contains:

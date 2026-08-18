@@ -3,13 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "eval:slow-peer": "bun run evals/slow-peer.ts",
     "hummingbirds": "bun run src/cli.ts",
     "ui:mock": "bun --port 4173 ./ui/mock.html",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint --type-aware src tests",
+    "lint": "oxlint --type-aware src tests evals",
     "knip": "knip",
-    "check": "tsc --noEmit && oxlint --type-aware src tests && bun test"
+    "check": "tsc --noEmit && oxlint --type-aware src tests evals && bun test"
   },
   "devDependencies": {
     "@types/bun": "latest",
