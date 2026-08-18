@@ -32,6 +32,23 @@ export type TraceEvent =
       question: string
     })
   | (EventBase & {
+      agentPid: number
+      codexEvents: string | null
+      kind: "codex_process_started"
+    })
+  | (EventBase & {
+      agentPid: number
+      durationMs: number
+      kind: "codex_process_completed"
+    })
+  | (EventBase & {
+      agentPid: number
+      durationMs: number
+      error: string
+      exitCode: number
+      kind: "codex_process_failed"
+    })
+  | (EventBase & {
       apiCall: number
       durationMs: number
       kind: "api_completed"

@@ -6,7 +6,7 @@ A small prototype of questions moving through a network of AI nodes. Every node 
 
 ```sh
 bun install
-export OPENAI_API_KEY=...
+codex login
 bun run hummingbirds run example/scenario.json \
   "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for tideglass trial Nacre-A?"
 ```
@@ -19,7 +19,9 @@ bun run hummingbirds inspect runs/<run> <request-id>
 
 Pass several quoted questions to `run` to ask them sequentially on the same live network. Later questions see the `nodes.md` learned from earlier ones.
 
-The default is `gpt-5.6-luna` with low reasoning. Override it with `OPENAI_MODEL` or `OPENAI_REASONING_EFFORT`. `OPENAI_BASE_URL` can point at another Responses-compatible endpoint.
+Each request starts a fresh, ephemeral `codex exec` process. Codex CLI authentication is reused; no API key is copied into a bird. Override the model or reasoning with `HUMMINGBIRDS_CODEX_MODEL` or `HUMMINGBIRDS_CODEX_REASONING_EFFORT`.
+
+For agent-level debugging, set `HUMMINGBIRDS_CODEX_JSON_TRACE=1`. Each node then retains Codex's raw JSONL events, final message, and stderr under `codex-traces/`; `/ask` still returns only the final plain-text answer.
 
 ## The boundary
 
@@ -30,16 +32,17 @@ server.ts
 agent.ts
 protocol.ts
 prompt.md
+AGENTS.md
 knowledge.md
 nodes.md
 events.jsonl
 ```
 
-`server.ts` only exposes `POST /ask`: plain text in, plain text out. `agent.ts` implements answering, forwarding, routing-memory updates, and trace recording.
+`server.ts` only exposes `POST /ask`: plain text in, plain text out. `agent.ts` starts a full Codex agent for each request and records process-level events. The rendered `AGENTS.md` is that bird's instruction prompt.
 
-`knowledge.md` is its private corpus. `nodes.md` is its only routing memory. A model may call two local capabilities: send a raw question to an address, or replace its own `nodes.md`. Web search is also available. Answers remain plain text and carry useful contributor IDs and addresses so a caller can learn a transitive route.
+`knowledge.md` is its private corpus. `nodes.md` is its routing memory. The agent can read and update both, ask another bird over HTTP, use its other agent capabilities, and search the web. Answers remain plain text and carry useful contributor IDs and addresses so a caller can learn a transitive route.
 
-The harness only copies folders, starts processes on ephemeral ports, seeds initial acquaintances, sends the root question, and reads append-only events. `network.json` and `events.jsonl` exist for inspection; neither is consulted when an agent routes.
+The harness only copies folders, renders the shared prompt, starts processes on ephemeral ports, seeds initial acquaintances, sends the root question, and reads append-only events. `network.json` and `events.jsonl` exist for inspection; neither is consulted when an agent routes. Codex is only the reference implementation behind `/ask`; another implementation can expose the same plain-text boundary.
 
 The scenario says only who initially knows whom. For example, `a → b → c` lets `a` begin with one unknown contact while the invented answer exists only in `c`'s corpus.
 

@@ -75,8 +75,7 @@ export async function startNetwork(
   const absoluteRunDirectory = resolve(runDirectory)
   const scenario = await loadScenario(absoluteScenarioPath)
   const scenarioDirectory = dirname(absoluteScenarioPath)
-  const apiKey = environment["OPENAI_API_KEY"] ?? process.env["OPENAI_API_KEY"]
-  if (apiKey === undefined || apiKey.length === 0) throw new Error("OPENAI_API_KEY is required")
+  const prompt = await readFile(join(sourceDirectory, "prompt.md"), "utf8")
 
   await mkdir(dirname(absoluteRunDirectory), { recursive: true })
   await mkdir(absoluteRunDirectory)
@@ -98,10 +97,7 @@ export async function startNetwork(
   )
 
   const spawned = scenario.nodes.map((seed) =>
-    spawnNode(seed.id, join(absoluteRunDirectory, seed.id), {
-      ...environment,
-      OPENAI_API_KEY: apiKey,
-    }),
+    spawnNode(seed.id, join(absoluteRunDirectory, seed.id), environment),
   )
 
   let nodes: RunningNode[]
@@ -116,10 +112,17 @@ export async function startNetwork(
     await Promise.all(
       scenario.nodes.map(async (seed) => {
         const knownNodes = seed.knows.map((knownId) => findNode(nodes, knownId))
-        await writeFile(
-          join(absoluteRunDirectory, seed.id, "nodes.md"),
-          renderKnownNodes(knownNodes),
-        )
+        const node = findNode(nodes, seed.id)
+        await Promise.all([
+          writeFile(
+            join(absoluteRunDirectory, seed.id, "AGENTS.md"),
+            renderNodePrompt(prompt, node),
+          ),
+          writeFile(
+            join(absoluteRunDirectory, seed.id, "nodes.md"),
+            renderKnownNodes(knownNodes),
+          ),
+        ])
       }),
     )
 
@@ -284,6 +287,10 @@ function renderKnownNodes(nodes: RunningNode[]): string {
     (node) => `- ${node.id} at ${node.url} — known, but no experience yet.`,
   )
   return lines.length === 0 ? "# Known nodes\n" : `# Known nodes\n\n${lines.join("\n")}\n`
+}
+
+function renderNodePrompt(prompt: string, node: RunningNode): string {
+  return prompt.replaceAll("[id]", node.id).replaceAll("[address]", node.url)
 }
 
 function findNode(nodes: RunningNode[], id: string): RunningNode {

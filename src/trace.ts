@@ -51,6 +51,29 @@ export function parseTraceEvent(value: unknown): TraceEvent {
         path: requireStringArray(record, "path"),
         question: requireString(record, "question"),
       }
+    case "codex_process_started":
+      return {
+        ...base,
+        agentPid: requireNumber(record, "agentPid"),
+        codexEvents: optionalString(record, "codexEvents"),
+        kind,
+      }
+    case "codex_process_completed":
+      return {
+        ...base,
+        agentPid: requireNumber(record, "agentPid"),
+        durationMs: requireNumber(record, "durationMs"),
+        kind,
+      }
+    case "codex_process_failed":
+      return {
+        ...base,
+        agentPid: requireNumber(record, "agentPid"),
+        durationMs: requireNumber(record, "durationMs"),
+        error: requireString(record, "error"),
+        exitCode: requireNumber(record, "exitCode"),
+        kind,
+      }
     case "api_completed":
       return {
         ...base,
@@ -138,5 +161,12 @@ function requireNullableString(record: JsonObject, key: string): string | null {
   if (value !== null && typeof value !== "string") {
     throw new Error(`${key} must be a string or null`)
   }
+  return value
+}
+
+function optionalString(record: JsonObject, key: string): string | null {
+  const value = record[key]
+  if (value === undefined || value === null) return null
+  if (typeof value !== "string") throw new Error(`${key} must be a string or null`)
   return value
 }
