@@ -57,6 +57,7 @@ export function parseTraceEvent(value: unknown): TraceEvent {
         agentPid: requireNumber(record, "agentPid"),
         codexEvents: optionalString(record, "codexEvents"),
         kind,
+        threadId: requireNullableString(record, "threadId"),
       }
     case "codex_process_completed":
       return {
@@ -64,6 +65,7 @@ export function parseTraceEvent(value: unknown): TraceEvent {
         agentPid: requireNumber(record, "agentPid"),
         durationMs: requireNumber(record, "durationMs"),
         kind,
+        threadId: requireString(record, "threadId"),
       }
     case "codex_process_failed":
       return {
@@ -73,6 +75,7 @@ export function parseTraceEvent(value: unknown): TraceEvent {
         error: requireString(record, "error"),
         exitCode: requireNumber(record, "exitCode"),
         kind,
+        threadId: requireNullableString(record, "threadId"),
       }
     case "api_completed":
       return {

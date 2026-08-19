@@ -168,14 +168,15 @@ async function runTrial(config: Config, prompt: string, trial: number) {
   peerUrl = `http://127.0.0.1:${peer.port}/ask`
 
   try {
-    await mkdir(join(scenarioDirectory, "a"), { recursive: true })
-    await Promise.all([
-      writeFile(
-        join(scenarioDirectory, "scenario.json"),
-        `${JSON.stringify({ entry: "a", nodes: [{ id: "a", knows: [] }] }, null, 2)}\n`,
-      ),
-      writeFile(join(scenarioDirectory, "a", "knowledge.md"), "# Private knowledge\n"),
-    ])
+    await mkdir(scenarioDirectory, { recursive: true })
+    await writeFile(
+      join(scenarioDirectory, "scenario.json"),
+      `${JSON.stringify(
+        { entry: "a", nodes: [{ id: "a", peers: [], seed: "" }] },
+        null,
+        2,
+      )}\n`,
+    )
 
     network = await startNetwork(join(scenarioDirectory, "scenario.json"), runDirectory, {
       HUMMINGBIRDS_CODEX_COMMAND: JSON.stringify([config.codex]),
@@ -188,11 +189,11 @@ async function runTrial(config: Config, prompt: string, trial: number) {
       writeFile(join(node.directory, "prompt.md"), prompt),
       writeFile(
         join(node.directory, "AGENTS.md"),
-        prompt.replaceAll("[id]", node.id).replaceAll("[address]", node.url),
-      ),
-      writeFile(
-        join(node.directory, "nodes.md"),
-        `# Known nodes\n\n- slow-peer at ${peerUrl} — known, but no experience yet.\n`,
+        prompt
+          .replaceAll("[id]", node.id)
+          .replaceAll("[address]", node.url)
+          .replaceAll("[peers]", `- slow-peer at ${peerUrl}`)
+          .replaceAll("[seed]", "(none)"),
       ),
     ])
 

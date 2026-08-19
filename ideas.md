@@ -4,8 +4,7 @@ Unfinished directions from the exploration. These are options, not commitments; 
 
 ## Learning over time
 
-- Grow `knowledge.md` from human-supplied private knowledge and vetted discoveries. Today only routing memory grows.
-- Stress one `nodes.md` across many subjects and failures: deduplicate and compress it, reconcile conflicting evidence, prefer shorter routes, revise stale generalizations, and handle concurrent writes.
+- Stress one continuing bird context across many subjects and failures: reconcile conflicting evidence, prefer shorter routes, revise stale generalizations, and see what survives compaction.
 - Compare prose-only routing with occasional exploration of unfamiliar peers. Try success counts, softmax, embeddings, or other representations only if prose stops working; trust should remain local rather than becoming global PageRank.
 - Eventually let each node choose its own routing storage—file, database, embedding, or model memory—while the network requires only text replies and useful contributor attribution.
 
@@ -18,10 +17,9 @@ Unfinished directions from the exploration. These are options, not commitments; 
 
 ## Scale and topology
 
-- Scale the cleaned harness from three to 12–24 nodes across several topics, with cold-to-warm routing, one stale route, and concurrent questions. Watch for emergent clusters, hubs, hierarchy, specialists, or router-like nodes before prescribing roles.
+- Scale the cleaned harness from three to 12–24 nodes across several topics, with cold-to-warm routing, one stale route, queued concurrent questions, and uneven load. Watch for emergent clusters, hubs, hierarchy, specialists, or router-like nodes before prescribing roles.
 - Test overload-driven node splitting and whether a specialty divides cleanly without central assignment.
-- Resolve concurrent `nodes.md` updates without moving route choice into the harness.
-- Compare fresh model calls with resident per-node sessions; if residency repeatedly helps, warm nodes lazily rather than warming the whole graph.
+- Decide how a restarted bird recovers its exact continuing session without making identity depend on one process lifetime.
 
 ## Actual distribution
 

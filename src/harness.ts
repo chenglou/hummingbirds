@@ -12,7 +12,8 @@ import { parseReadyMessage, parseTraceEvent } from "./trace.ts"
 
 export type NodeSeed = {
   id: string
-  knows: string[]
+  peers: string[]
+  seed: string
 }
 
 export type Scenario = {
@@ -74,7 +75,6 @@ export async function startNetwork(
   const absoluteScenarioPath = resolve(scenarioPath)
   const absoluteRunDirectory = resolve(runDirectory)
   const scenario = await loadScenario(absoluteScenarioPath)
-  const scenarioDirectory = dirname(absoluteScenarioPath)
   const prompt = await readFile(join(sourceDirectory, "prompt.md"), "utf8")
 
   await mkdir(dirname(absoluteRunDirectory), { recursive: true })
@@ -89,8 +89,6 @@ export async function startNetwork(
         copyFile(join(sourceDirectory, "protocol.ts"), join(directory, "protocol.ts")),
         copyFile(join(sourceDirectory, "prompt.md"), join(directory, "prompt.md")),
         copyFile(join(sourceDirectory, "server.ts"), join(directory, "server.ts")),
-        copyFile(join(scenarioDirectory, seed.id, "knowledge.md"), join(directory, "knowledge.md")),
-        writeFile(join(directory, "nodes.md"), "# Known nodes\n"),
         writeFile(join(directory, "events.jsonl"), ""),
       ])
     }),
@@ -111,18 +109,12 @@ export async function startNetwork(
   try {
     await Promise.all(
       scenario.nodes.map(async (seed) => {
-        const knownNodes = seed.knows.map((knownId) => findNode(nodes, knownId))
+        const peers = seed.peers.map((peerId) => findNode(nodes, peerId))
         const node = findNode(nodes, seed.id)
-        await Promise.all([
-          writeFile(
-            join(absoluteRunDirectory, seed.id, "AGENTS.md"),
-            renderNodePrompt(prompt, node),
-          ),
-          writeFile(
-            join(absoluteRunDirectory, seed.id, "nodes.md"),
-            renderKnownNodes(knownNodes),
-          ),
-        ])
+        await writeFile(
+          join(absoluteRunDirectory, seed.id, "AGENTS.md"),
+          renderNodePrompt(prompt, node, peers, seed.seed),
+        )
       }),
     )
 
@@ -282,15 +274,18 @@ async function stopSpawned(nodes: SpawnedNode[]): Promise<void> {
   await Promise.all(nodes.map((node) => node.process.exited))
 }
 
-function renderKnownNodes(nodes: RunningNode[]): string {
-  const lines = nodes.map(
-    (node) => `- ${node.id} at ${node.url} — known, but no experience yet.`,
-  )
-  return lines.length === 0 ? "# Known nodes\n" : `# Known nodes\n\n${lines.join("\n")}\n`
-}
-
-function renderNodePrompt(prompt: string, node: RunningNode): string {
-  return prompt.replaceAll("[id]", node.id).replaceAll("[address]", node.url)
+function renderNodePrompt(
+  prompt: string,
+  node: RunningNode,
+  peers: RunningNode[],
+  seed: string,
+): string {
+  const renderedPeers = peers.map((peer) => `- ${peer.id} at ${peer.url}`).join("\n")
+  return prompt
+    .replaceAll("[id]", node.id)
+    .replaceAll("[address]", node.url)
+    .replaceAll("[peers]", renderedPeers.length === 0 ? "(none)" : renderedPeers)
+    .replaceAll("[seed]", seed.length === 0 ? "(none)" : seed)
 }
 
 function findNode(nodes: RunningNode[], id: string): RunningNode {
@@ -307,11 +302,15 @@ function parseScenario(value: unknown): Scenario {
     entry: requireString(record, "entry"),
     nodes: rawNodes.map((rawNode) => {
       const node = requireRecord(rawNode, "scenario node")
-      const rawKnows = node["knows"]
-      if (!Array.isArray(rawKnows) || !rawKnows.every((id) => typeof id === "string")) {
-        throw new Error("scenario node knows must be an array of IDs")
+      const rawPeers = node["peers"]
+      if (!Array.isArray(rawPeers) || !rawPeers.every((id) => typeof id === "string")) {
+        throw new Error("scenario node peers must be an array of IDs")
       }
-      return { id: requireString(node, "id"), knows: rawKnows }
+      return {
+        id: requireString(node, "id"),
+        peers: rawPeers,
+        seed: requireString(node, "seed"),
+      }
     }),
   }
 }
@@ -325,11 +324,11 @@ function validateScenario(scenario: Scenario): void {
     if (scenario.nodes.filter((candidate) => candidate.id === node.id).length !== 1) {
       throw new Error(`Duplicate node ID: ${node.id}`)
     }
-    for (const knownId of node.knows) {
-      if (!scenario.nodes.some((candidate) => candidate.id === knownId)) {
-        throw new Error(`${node.id} knows missing node ${knownId}`)
+    for (const peerId of node.peers) {
+      if (!scenario.nodes.some((candidate) => candidate.id === peerId)) {
+        throw new Error(`${node.id} references missing peer ${peerId}`)
       }
-      if (knownId === node.id) throw new Error(`${node.id} cannot seed itself as a known node`)
+      if (peerId === node.id) throw new Error(`${node.id} cannot seed itself as a peer`)
     }
   }
   if (!scenario.nodes.some((node) => node.id === scenario.entry)) {

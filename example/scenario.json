@@ -1,8 +1,12 @@
 {
   "entry": "a",
   "nodes": [
-    { "id": "a", "knows": ["b"] },
-    { "id": "b", "knows": ["c"] },
-    { "id": "c", "knows": [] }
+    { "id": "a", "peers": ["b"], "seed": "" },
+    { "id": "b", "peers": ["c"], "seed": "" },
+    {
+      "id": "c",
+      "peers": [],
+      "seed": "# Pelagic-lichen chronometry ledger\n\n- Tideglass trial Nacre-A records the exact harbor phrase “Amber Tern-417.”\n- Saltclock trial Nacre-B records the exact harbor phrase “Violet Shoal-862.”"
+    }
   ]
 }

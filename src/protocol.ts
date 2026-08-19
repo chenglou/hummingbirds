@@ -35,11 +35,13 @@ export type TraceEvent =
       agentPid: number
       codexEvents: string | null
       kind: "codex_process_started"
+      threadId: string | null
     })
   | (EventBase & {
       agentPid: number
       durationMs: number
       kind: "codex_process_completed"
+      threadId: string
     })
   | (EventBase & {
       agentPid: number
@@ -47,6 +49,7 @@ export type TraceEvent =
       error: string
       exitCode: number
       kind: "codex_process_failed"
+      threadId: string | null
     })
   | (EventBase & {
       apiCall: number

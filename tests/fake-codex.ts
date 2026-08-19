@@ -1,18 +1,44 @@
-import { readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { join } from "node:path"
 
-import { headers } from "../src/protocol.ts"
+import { headers, requireRecord, requireString } from "../src/protocol.ts"
+
+type Peer = {
+  address: string
+  id: string
+}
+
+type Session = {
+  peers: Peer[]
+  threadId: string
+}
+
+if (process.argv.includes("--ephemeral")) throw new Error("Bird sessions must not be ephemeral")
+if (!process.argv.includes("--json")) throw new Error("Fake Codex requires JSON mode")
+if (!process.argv.includes('sandbox_mode="workspace-write"')) {
+  throw new Error("Bird sessions require the network-enabled workspace sandbox")
+}
 
 const nodeId = requireEnvironment("HUMMINGBIRDS_NODE_ID")
 const nodeAddress = requireEnvironment("HUMMINGBIRDS_NODE_ADDRESS")
+const stateDirectory = requireEnvironment("HUMMINGBIRDS_FAKE_STATE_DIRECTORY")
+const agents = await readFile("AGENTS.md", "utf8")
 const question = await Bun.stdin.text()
-let answer: string
+const resumedThreadId = resumedSessionId()
+const session =
+  resumedThreadId === null
+    ? { peers: parseInitialPeers(agents), threadId: crypto.randomUUID() }
+    : await readSession(resumedThreadId)
 
-if (nodeId === "c") {
-  const phrase = question.includes("Nacre-B") ? "Violet Shoal-862." : "Amber Tern-417."
-  answer = `${phrase}\n\nContributors: c at ${nodeAddress}`
-} else {
-  const nodes = await readFile("nodes.md", "utf8")
-  const peer = choosePeer(nodes, nodeId, question)
+const delayMs = readDelay()
+if (delayMs > 0) await Bun.sleep(delayMs)
+
+const privateAnswer = answerFromPrivateKnowledge(agents, question)
+let answer: string
+if (privateAnswer !== null) {
+  answer = `${privateAnswer}\n\nContributors: ${nodeId} at ${nodeAddress}`
+} else if (session.peers.length > 0 && question.includes("Nacre-")) {
+  const peer = choosePeer(session.peers)
   const response = await fetch(peer.address, {
     method: "POST",
     headers: {
@@ -27,23 +53,89 @@ if (nodeId === "c") {
   })
   answer = await response.text()
   if (!response.ok) throw new Error(`Peer ${peer.id} returned ${response.status}: ${answer}`)
-
-  const contributorAddress = requireMatch(answer, /Contributors: c at (http:\/\/\S+\/ask)/, "c")
-  await writeFile(
-    "nodes.md",
-    renderLearnedNodes(nodes, nodeId, peer, contributorAddress),
-  )
-  await rememberAnswer(question, answer)
+  learnContributors(session.peers, answer)
+} else {
+  answer = `Handled by ${nodeId}: ${question}`
 }
 
-await outputAnswer(answer)
+await mkdir(stateDirectory, { recursive: true })
+await writeFile(sessionPath(session.threadId), `${JSON.stringify(session, null, 2)}\n`)
+await outputAnswer(answer, session.threadId)
 
-async function outputAnswer(value: string): Promise<void> {
-  if (!process.argv.includes("--json")) {
-    process.stdout.write(value)
-    return
+function resumedSessionId(): string | null {
+  const resumeIndex = process.argv.indexOf("resume")
+  if (resumeIndex < 0) return null
+  const prompt = process.argv.at(-1)
+  const value = process.argv.at(-2)
+  if (prompt !== "-" || value === undefined || value.length === 0) {
+    throw new Error("Resume requires an exact session ID followed by stdin")
   }
+  return value
+}
 
+async function readSession(expectedThreadId: string): Promise<Session> {
+  const record = requireRecord(
+    JSON.parse(await readFile(sessionPath(expectedThreadId), "utf8")),
+    "fake session",
+  )
+  const rawPeers = record["peers"]
+  if (!Array.isArray(rawPeers)) throw new Error("fake session peers must be an array")
+  const peers = rawPeers.map((value) => {
+    const peer = requireRecord(value, "fake session peer")
+    return { address: requireString(peer, "address"), id: requireString(peer, "id") }
+  })
+  const storedThreadId = requireString(record, "threadId")
+  if (storedThreadId !== expectedThreadId) throw new Error("Fake Codex resumed the wrong session")
+  return { peers, threadId: storedThreadId }
+}
+
+function sessionPath(value: string): string {
+  return join(stateDirectory, `${value}.json`)
+}
+
+function parseInitialPeers(text: string): Peer[] {
+  const peers: Peer[] = []
+  const pattern = /^- ([A-Za-z0-9_-]+) at (http:\/\/\S+\/ask)$/gm
+  for (const match of text.matchAll(pattern)) {
+    const id = match[1]
+    const address = match[2]
+    if (id === undefined || address === undefined) throw new Error("Invalid initial peer")
+    peers.push({ address, id })
+  }
+  return peers
+}
+
+function answerFromPrivateKnowledge(text: string, incomingQuestion: string): string | null {
+  const trial = /(Nacre-[A-Z])/.exec(incomingQuestion)?.[1]
+  if (trial === undefined) return null
+  const line = text.split("\n").find((candidate) => candidate.includes(trial))
+  if (line === undefined) return null
+  return /“([^”]+)”/.exec(line)?.[1] ?? null
+}
+
+function choosePeer(peers: Peer[]): Peer {
+  return peers.find((peer) => peer.id === "c") ?? requireFirst(peers)
+}
+
+function requireFirst<T>(values: T[]): T {
+  const value = values[0]
+  if (value === undefined) throw new Error("Expected a peer")
+  return value
+}
+
+function learnContributors(peers: Peer[], response: string): void {
+  const pattern = /Contributors?: ([A-Za-z0-9_-]+) at (http:\/\/\S+\/ask)/g
+  for (const match of response.matchAll(pattern)) {
+    const id = match[1]
+    const address = match[2]
+    if (id === undefined || address === undefined) throw new Error("Invalid contributor")
+    const existing = peers.find((peer) => peer.id === id)
+    if (existing === undefined) peers.push({ address, id })
+    else existing.address = address
+  }
+}
+
+async function outputAnswer(value: string, activeThreadId: string): Promise<void> {
   const optionIndex = process.argv.indexOf("--output-last-message")
   const outputPath = process.argv[optionIndex + 1]
   if (optionIndex < 0 || outputPath === undefined) {
@@ -51,7 +143,7 @@ async function outputAnswer(value: string): Promise<void> {
   }
   await writeFile(outputPath, value)
   const events = [
-    { thread_id: `fixture-${crypto.randomUUID()}`, type: "thread.started" },
+    { thread_id: activeThreadId, type: "thread.started" },
     {
       item: { id: crypto.randomUUID(), text: value, type: "agent_message" },
       type: "item.completed",
@@ -61,58 +153,11 @@ async function outputAnswer(value: string): Promise<void> {
   process.stdout.write(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`)
 }
 
-function choosePeer(
-  nodes: string,
-  currentNodeId: string,
-  incomingQuestion: string,
-): { address: string; id: string } {
-  if (currentNodeId === "a" && incomingQuestion.includes("Nacre-B")) {
-    const address = addressOf(nodes, "c")
-    if (address !== null) return { address, id: "c" }
-  }
-  const match = /- ([A-Za-z0-9_-]+) at (http:\/\/\S+\/ask) —/.exec(nodes)
-  if (match?.[1] === undefined || match[2] === undefined) throw new Error("No known peer")
-  return { id: match[1], address: match[2] }
-}
-
-function renderLearnedNodes(
-  previous: string,
-  currentNodeId: string,
-  peer: { address: string; id: string },
-  contributorAddress: string,
-): string {
-  if (currentNodeId === "b") {
-    return `# Known nodes\n\n- c at ${contributorAddress} — answered pelagic-lichen ledger questions.\n`
-  }
-  const bAddress = addressOf(previous, "b")
-  if (bAddress === null) throw new Error("a lost b")
-  const cDescription =
-    peer.id === "c"
-      ? "directly answered pelagic-lichen ledger questions."
-      : "answered pelagic-lichen ledger questions, learned via b."
-  return `# Known nodes\n\n- b at ${bAddress} — successfully relayed pelagic-lichen ledger questions.\n- c at ${contributorAddress} — ${cDescription}\n`
-}
-
-async function rememberAnswer(incomingQuestion: string, answer: string): Promise<void> {
-  const trial = requireMatch(incomingQuestion, /(Nacre-[AB])/, "trial")
-  const phrase = requireMatch(answer, /^([^\n]+)/, "answer")
-  const knowledge = await readFile("knowledge.md", "utf8")
-  if (knowledge.includes(trial)) return
-  const separator = knowledge.endsWith("\n") ? "" : "\n"
-  await writeFile(
-    "knowledge.md",
-    `${knowledge}${separator}\n- ${trial} records the exact harbor phrase “${phrase}”\n`,
-  )
-}
-
-function addressOf(nodes: string, id: string): string | null {
-  const escapedId = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  return new RegExp(`- ${escapedId} at (http:\\/\\/\\S+\\/ask) —`).exec(nodes)?.[1] ?? null
-}
-
-function requireMatch(text: string, pattern: RegExp, label: string): string {
-  const value = pattern.exec(text)?.[1]
-  if (value === undefined) throw new Error(`Could not find ${label}`)
+function readDelay(): number {
+  const raw = Bun.env["HUMMINGBIRDS_FAKE_DELAY_MS"]
+  if (raw === undefined) return 0
+  const value = Number(raw)
+  if (!Number.isFinite(value) || value < 0) throw new Error("Invalid fake delay")
   return value
 }
 
