@@ -19,7 +19,7 @@ bun run hummingbirds inspect runs/<run> <request-id>
 
 Pass several quoted questions to `run` to ask them sequentially on the same live network. Each request launches a Codex CLI process that resumes that bird's exact session, so later questions retain earlier facts and routing experience in context. A bird handles only one model turn at a time; concurrent requests wait in its local queue.
 
-Codex CLI authentication is reused; no API key is copied into a bird. Override the model or reasoning with `HUMMINGBIRDS_CODEX_MODEL` or `HUMMINGBIRDS_CODEX_REASONING_EFFORT`.
+Codex CLI authentication is reused; no API key is copied into a bird. Override the model, reasoning effort, or diagnostic reasoning summary with `HUMMINGBIRDS_CODEX_MODEL`, `HUMMINGBIRDS_CODEX_REASONING_EFFORT`, or `HUMMINGBIRDS_CODEX_REASONING_SUMMARY`.
 
 For agent-level debugging, set `HUMMINGBIRDS_CODEX_JSON_TRACE=1`. Each node then retains Codex's raw JSONL events, final message, and stderr under `codex-traces/`; `/ask` still returns only the final plain-text answer.
 

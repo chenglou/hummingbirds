@@ -297,6 +297,10 @@ function codexArguments(answerPath: string, resumedThreadId: string | null): str
   if (effort !== undefined && effort.length > 0) {
     arguments_.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`)
   }
+  const summary = Bun.env["HUMMINGBIRDS_CODEX_REASONING_SUMMARY"]
+  if (summary !== undefined && summary.length > 0) {
+    arguments_.push("-c", `model_reasoning_summary=${JSON.stringify(summary)}`)
+  }
   arguments_.push("--json", "--output-last-message", answerPath)
   if (resumedThreadId !== null) arguments_.push(resumedThreadId)
   arguments_.push("-")
