@@ -1,4 +1,5 @@
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises"
+import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 
 import {
@@ -59,7 +60,15 @@ type SpawnedNode = {
   process: Bun.Subprocess<"ignore", "pipe", "pipe">
 }
 
+type NodeRuntime = {
+  directory: string
+  id: string
+  root: string
+}
+
 const sourceDirectory = import.meta.dir
+const eventLogPathEnvironment = "HUMMINGBIRDS_EVENT_LOG_PATH"
+const networkRuntimes = new WeakMap<RunningNetwork, NodeRuntime[]>()
 
 export async function loadScenario(path: string): Promise<Scenario> {
   const scenario = parseScenario(parseJson(await readFile(path, "utf8")))
@@ -80,39 +89,56 @@ export async function startNetwork(
   await mkdir(dirname(absoluteRunDirectory), { recursive: true })
   await mkdir(absoluteRunDirectory)
 
-  await Promise.all(
-    scenario.nodes.map(async (seed) => {
-      const directory = join(absoluteRunDirectory, seed.id)
-      await mkdir(directory)
-      await Promise.all([
-        copyFile(join(sourceDirectory, "agent.ts"), join(directory, "agent.ts")),
-        copyFile(join(sourceDirectory, "protocol.ts"), join(directory, "protocol.ts")),
-        copyFile(join(sourceDirectory, "prompt.md"), join(directory, "prompt.md")),
-        copyFile(join(sourceDirectory, "server.ts"), join(directory, "server.ts")),
-        writeFile(join(directory, "events.jsonl"), ""),
-      ])
-    }),
-  )
+  const runtimes: NodeRuntime[] = []
+  try {
+    for (const seed of scenario.nodes) {
+      const root = await mkdtemp(join(tmpdir(), "hummingbirds-node-"))
+      runtimes.push({ directory: join(root, "workspace"), id: seed.id, root })
+    }
+    await Promise.all(
+      runtimes.map(async (runtime) => {
+        const archiveDirectory = join(absoluteRunDirectory, runtime.id)
+        await Promise.all([mkdir(runtime.directory), mkdir(archiveDirectory)])
+        await Promise.all([
+          copyFile(join(sourceDirectory, "agent.ts"), join(runtime.directory, "agent.ts")),
+          copyFile(join(sourceDirectory, "protocol.ts"), join(runtime.directory, "protocol.ts")),
+          copyFile(join(sourceDirectory, "prompt.md"), join(runtime.directory, "prompt.md")),
+          copyFile(join(sourceDirectory, "server.ts"), join(runtime.directory, "server.ts")),
+          writeFile(join(archiveDirectory, "events.jsonl"), ""),
+        ])
+      }),
+    )
+  } catch (error) {
+    await removeRuntimeRoots(runtimes)
+    throw error
+  }
 
-  const spawned = scenario.nodes.map((seed) =>
-    spawnNode(seed.id, join(absoluteRunDirectory, seed.id), environment),
+  const spawned = runtimes.map((runtime) =>
+    spawnNode(
+      runtime.id,
+      runtime.directory,
+      join(absoluteRunDirectory, runtime.id, "events.jsonl"),
+      environment,
+    ),
   )
 
   let nodes: RunningNode[]
   try {
     nodes = await Promise.all(spawned.map(readReady))
   } catch (error) {
-    await stopSpawned(spawned)
+    await stopSpawned(spawned, runtimes)
     throw error
   }
 
+  const network = { entry: scenario.entry, nodes, runDirectory: absoluteRunDirectory }
+  networkRuntimes.set(network, runtimes)
   try {
     await Promise.all(
       scenario.nodes.map(async (seed) => {
         const peers = seed.peers.map((peerId) => findNode(nodes, peerId))
         const node = findNode(nodes, seed.id)
         await writeFile(
-          join(absoluteRunDirectory, seed.id, "AGENTS.md"),
+          join(node.directory, "AGENTS.md"),
           renderNodePrompt(prompt, node, peers, seed.seed),
         )
       }),
@@ -123,9 +149,9 @@ export async function startNetwork(
       nodes: nodes.map(({ id, pid, url }) => ({ id, pid, url })),
     }
     await writeFile(join(absoluteRunDirectory, "network.json"), `${JSON.stringify(manifest, null, 2)}\n`)
-    return { entry: scenario.entry, nodes, runDirectory: absoluteRunDirectory }
+    return network
   } catch (error) {
-    await stopNetwork({ entry: scenario.entry, nodes, runDirectory: absoluteRunDirectory })
+    await stopNetwork(network)
     throw error
   }
 }
@@ -167,8 +193,20 @@ export async function askNetwork(
 }
 
 export async function stopNetwork(network: RunningNetwork): Promise<void> {
+  const runtimes = networkRuntimes.get(network)
+  if (runtimes === undefined) throw new Error("Unknown or already stopped network")
   for (const node of network.nodes) node.process.kill()
   await Promise.all(network.nodes.map((node) => node.process.exited))
+  await Promise.all(
+    runtimes.map((runtime) =>
+      cp(runtime.directory, join(network.runDirectory, runtime.id), {
+        filter: (source) => resolve(source) !== join(runtime.directory, "events.jsonl"),
+        recursive: true,
+      }),
+    ),
+  )
+  await removeRuntimeRoots(runtimes)
+  networkRuntimes.delete(network)
 }
 
 export async function readTrace(
@@ -202,6 +240,7 @@ export async function readTrace(
 function spawnNode(
   id: string,
   directory: string,
+  eventLogPath: string,
   environment: Record<string, string>,
 ): SpawnedNode {
   const child = Bun.spawn({
@@ -210,6 +249,7 @@ function spawnNode(
     env: {
       ...process.env,
       ...environment,
+      [eventLogPathEnvironment]: eventLogPath,
       HUMMINGBIRDS_NODE_ID: id,
       HUMMINGBIRDS_PORT: "0",
     },
@@ -269,9 +309,14 @@ async function readFirstLine(stream: ReadableStream<Uint8Array>): Promise<string
   }
 }
 
-async function stopSpawned(nodes: SpawnedNode[]): Promise<void> {
+async function stopSpawned(nodes: SpawnedNode[], runtimes: NodeRuntime[]): Promise<void> {
   for (const node of nodes) node.process.kill()
   await Promise.all(nodes.map((node) => node.process.exited))
+  await removeRuntimeRoots(runtimes)
+}
+
+async function removeRuntimeRoots(runtimes: NodeRuntime[]): Promise<void> {
+  await Promise.all(runtimes.map((runtime) => rm(runtime.root, { force: true, recursive: true })))
 }
 
 function renderNodePrompt(

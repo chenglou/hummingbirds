@@ -33,4 +33,5 @@ Unfinished directions from the exploration. These are options, not commitments; 
 
 ## Harness cleanup
 
-- Ablate tracing to a tiny local JSONL log of receive, call, reply, routing-change, and return events. Compare it with an optional `/log` view or external HTTP tracing while keeping `POST /ask` the only required protocol.
+- Define abrupt shutdown: drain or terminate active Codex descendants before archiving, rather than deleting a workspace under an unfinished turn.
+- Strengthen eval-only privacy only if later birds defeat the separated runtime roots by scanning global temporary directories, source scenarios, or shared Codex state.

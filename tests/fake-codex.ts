@@ -18,6 +18,9 @@ if (!process.argv.includes("--json")) throw new Error("Fake Codex requires JSON 
 if (!process.argv.includes('sandbox_mode="workspace-write"')) {
   throw new Error("Bird sessions require the network-enabled workspace sandbox")
 }
+if (Bun.env["HUMMINGBIRDS_EVENT_LOG_PATH"] !== undefined) {
+  throw new Error("The archive event path must remain private to the Bun server")
+}
 
 const nodeId = requireEnvironment("HUMMINGBIRDS_NODE_ID")
 const nodeAddress = requireEnvironment("HUMMINGBIRDS_NODE_ADDRESS")

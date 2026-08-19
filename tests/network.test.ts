@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 
 import {
   askNetwork,
@@ -44,6 +44,11 @@ describe("Hummingbirds", () => {
       const a = findNode(network, "a")
       const b = findNode(network, "b")
       const c = findNode(network, "c")
+      expect(a.directory.startsWith(runDirectory)).toBe(false)
+      expect(b.directory.startsWith(runDirectory)).toBe(false)
+      expect(dirname(a.directory)).not.toBe(dirname(b.directory))
+      expect(await Bun.file(join(a.directory, "events.jsonl")).exists()).toBe(false)
+      expect(await Bun.file(join(runDirectory, "a", "events.jsonl")).exists()).toBe(true)
       expect(new Set(network.nodes.map((node) => node.pid)).size).toBe(3)
       expect(new Set(network.nodes.map((node) => node.url)).size).toBe(3)
       expect(await readFile(join(a.directory, "server.ts"), "utf8")).toBe(
@@ -145,6 +150,19 @@ describe("Hummingbirds", () => {
           (event) => event.kind === "codex_process_started",
         ).length,
       ).toBe(startsBeforeCycle)
+
+      await writeFile(join(a.directory, "events.jsonl"), "poisoned workspace trace\n")
+      await stopNetwork(network)
+      network = null
+      expect(await Bun.file(join(a.directory, "AGENTS.md")).exists()).toBe(false)
+      expect(await readFile(join(runDirectory, "a", "AGENTS.md"), "utf8")).toBe(aAgents)
+      expect(await readFile(join(runDirectory, "a", "events.jsonl"), "utf8")).not.toContain(
+        "poisoned workspace trace",
+      )
+      expect(await readFile(join(runDirectory, "a", aStart.codexEvents), "utf8")).toContain(
+        '"type":"turn.completed"',
+      )
+      expect(await readTrace(runDirectory, "request-probe")).not.toHaveLength(0)
     } finally {
       if (network !== null) await stopNetwork(network)
     }

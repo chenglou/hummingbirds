@@ -39,6 +39,8 @@ type CodexEvents = {
 let sequence = 0
 let threadId: string | null = null
 let turnQueue: Promise<void> = Promise.resolve()
+const eventLogPathEnvironment = "HUMMINGBIRDS_EVENT_LOG_PATH"
+const eventLogPath = Bun.env[eventLogPathEnvironment] ?? "events.jsonl"
 
 export async function answerQuestion(
   question: string,
@@ -120,11 +122,13 @@ async function runCodex(question: string, context: AgentRequest): Promise<CodexR
       ...codexCommand(),
       ...codexArguments(capture.answerPath, resumedThreadId),
     ]
+    const childEnvironment = { ...process.env }
+    delete childEnvironment[eventLogPathEnvironment]
     const child = Bun.spawn({
       cmd: command,
       cwd: process.cwd(),
       env: {
-        ...process.env,
+        ...childEnvironment,
         HUMMINGBIRDS_CALLER_ID: context.callerId,
         HUMMINGBIRDS_INVOCATION_ID: context.invocationId,
         HUMMINGBIRDS_NODE_ADDRESS: context.address,
@@ -381,7 +385,7 @@ function eventBase(context: AgentRequest) {
 }
 
 async function record(event: TraceEvent): Promise<void> {
-  await appendFile("events.jsonl", `${JSON.stringify(event)}\n`)
+  await appendFile(eventLogPath, `${JSON.stringify(event)}\n`)
 }
 
 function errorMessage(error: unknown): string {

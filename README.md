@@ -40,9 +40,11 @@ bun run eval:routing
 
 Nodes have bounded local peer and learned-fact memory. Answers are exact hidden tokens; successful return paths credit only immediate callees, while provider attribution lets callers discover untested peers. Seen and held-out probes separate answer caching from topic-level routing generalization. A query follows one non-repeating path, so it ends at an answer or dead end without an arbitrary hop limit. See the [methods and first results](evals/routing-simulation.md).
 
+The [first live stateful-routing exploration](evals/live-routing.md) records the complementary model-backed results: useful broker hierarchy, conflict resolution, contextual self-answering, and clean route shortening across two interleaved topics.
+
 ## The boundary
 
-Each runtime node contains:
+Each live node workspace contains:
 
 ```text
 server.ts
@@ -50,14 +52,13 @@ agent.ts
 protocol.ts
 prompt.md
 AGENTS.md
-events.jsonl
 ```
 
-`server.ts` exposes only `POST /ask`: plain text in, plain text out. `agent.ts` starts or resumes the bird's full Codex session and records process-level events. The rendered `AGENTS.md` contains the shared prompt, that bird's ID and address, its initial peers, and its initial private knowledge.
+`server.ts` exposes only `POST /ask`: plain text in, plain text out. `agent.ts` starts or resumes the bird's full Codex session and records process-level events in the run archive. The rendered `AGENTS.md` contains the shared prompt, that bird's ID and address, its initial peers, and its initial private knowledge.
 
 There are no mutable routing or knowledge files. Later facts, peer evaluations, and discovered routes remain in the Codex conversation. The Bun server remembers the exact Codex thread ID for the lifetime of the running bird; restart-and-resume is deliberately deferred.
 
-The harness only creates isolated folders, renders the initial context, starts processes on ephemeral ports, sends root questions, and reads append-only events. `network.json` and `events.jsonl` exist for inspection; neither is consulted when an agent routes. Codex is only the reference implementation behind `/ask`; another implementation can expose the same plain-text boundary.
+The harness gives each bird a separate temporary workspace, renders the initial context, starts processes on ephemeral ports, sends root questions, and streams append-only events into one run archive. On orderly shutdown, it archives the remaining workspace files there too. This prevents ordinary parent-directory inspection from turning the local simulation into a global directory; it is not an adversarial filesystem boundary. `network.json` and `events.jsonl` exist for inspection; neither is consulted when an agent routes. Codex is only the reference implementation behind `/ask`; another implementation can expose the same plain-text boundary.
 
 The scenario supplies initial peer IDs and private seed text. For example, `a → b → c` lets `a` begin with one unknown contact while the invented answer starts only in `c`'s context:
 
