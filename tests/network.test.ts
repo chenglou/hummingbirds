@@ -11,6 +11,7 @@ import {
   type RunningNetwork,
 } from "../src/harness.ts"
 import { headers } from "../src/protocol.ts"
+import { parseReadyMessage } from "../src/trace.ts"
 
 const temporaryDirectories: string[] = []
 
@@ -21,25 +22,26 @@ afterAll(async () => {
 })
 
 describe("Hummingbirds", () => {
-  test("resumes each bird's session and learns a route in context", async () => {
+  test("resumes a bird's session after its server restarts", async () => {
     const trainingQuestion =
       "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for tideglass trial Nacre-A?"
     const probeQuestion =
       "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for saltclock trial Nacre-B?"
     const temporaryDirectory = await makeTemporaryDirectory()
     const runDirectory = join(temporaryDirectory, "run")
+    const environment = {
+      HUMMINGBIRDS_CODEX_COMMAND: JSON.stringify([
+        process.execPath,
+        "run",
+        resolve("tests/fake-codex.ts"),
+      ]),
+      HUMMINGBIRDS_CODEX_JSON_TRACE: "1",
+      HUMMINGBIRDS_FAKE_STATE_DIRECTORY: join(temporaryDirectory, "fake-codex"),
+    }
     let network: RunningNetwork | null = null
 
     try {
-      network = await startNetwork(resolve("example/scenario.json"), runDirectory, {
-        HUMMINGBIRDS_CODEX_COMMAND: JSON.stringify([
-          process.execPath,
-          "run",
-          resolve("tests/fake-codex.ts"),
-        ]),
-        HUMMINGBIRDS_CODEX_JSON_TRACE: "1",
-        HUMMINGBIRDS_FAKE_STATE_DIRECTORY: join(temporaryDirectory, "fake-codex"),
-      })
+      network = await startNetwork(resolve("example/scenario.json"), runDirectory, environment)
 
       const a = findNode(network, "a")
       const b = findNode(network, "b")
@@ -100,6 +102,23 @@ describe("Hummingbirds", () => {
         '"type":"turn.completed"',
       )
 
+      const firstACompletion = trainingTrace.find(
+        (event) => event.kind === "codex_process_completed" && event.nodeId === "a",
+      )
+      if (
+        firstACompletion === undefined ||
+        firstACompletion.kind !== "codex_process_completed"
+      ) {
+        throw new Error("Missing first A completion")
+      }
+      const firstThreadId = firstACompletion.threadId
+      expect(await readFile(join(runDirectory, "a", "thread-id"), "utf8")).toBe(
+        firstThreadId,
+      )
+      const restartedA = await restartNode(network, a, environment)
+      expect(restartedA.process.pid).not.toBe(a.process.pid)
+      expect(restartedA.url).toBe(a.url)
+
       const probeResult = await askNetwork(network, probeQuestion, "request-probe")
       expect(probeResult.answer).toBe(`Violet Shoal-862.\n\nContributors: c at ${c.url}`)
       expect(probeResult.status).toBe(200)
@@ -119,8 +138,6 @@ describe("Hummingbirds", () => {
         .filter((event) => event.nodeId === "a")
       expect(aStarts).toHaveLength(2)
       expect(aCompletions).toHaveLength(2)
-      const firstThreadId = aCompletions[0]?.threadId
-      if (firstThreadId === undefined) throw new Error("Missing first A thread")
       expect(aStarts.map((event) => event.threadId)).toEqual([null, firstThreadId])
       expect(aCompletions.map((event) => event.threadId)).toEqual([
         firstThreadId,
@@ -132,7 +149,7 @@ describe("Hummingbirds", () => {
       const startsBeforeCycle = fullTrace.filter(
         (event) => event.kind === "codex_process_started",
       ).length
-      const cycleResponse = await fetch(a.url, {
+      const cycleResponse = await fetch(restartedA.url, {
         method: "POST",
         headers: {
           [headers.callerId]: "test",
@@ -148,7 +165,10 @@ describe("Hummingbirds", () => {
         ).length,
       ).toBe(startsBeforeCycle)
 
-      await writeFile(join(a.directory, "events.jsonl"), "poisoned workspace trace\n")
+      await Promise.all([
+        writeFile(join(a.directory, "events.jsonl"), "poisoned workspace trace\n"),
+        writeFile(join(a.directory, "thread-id"), "poisoned workspace thread\n"),
+      ])
       await stopNetwork(network)
       network = null
       expect(await Bun.file(join(a.directory, "AGENTS.md")).exists()).toBe(false)
@@ -156,6 +176,7 @@ describe("Hummingbirds", () => {
       expect(await readFile(join(runDirectory, "a", "events.jsonl"), "utf8")).not.toContain(
         "poisoned workspace trace",
       )
+      expect(await readFile(join(runDirectory, "a", "thread-id"), "utf8")).toBe(firstThreadId)
       expect(await readFile(join(runDirectory, "a", aStart.codexEvents), "utf8")).toContain(
         '"type":"turn.completed"',
       )
@@ -285,4 +306,57 @@ function findNode(network: RunningNetwork, id: string): RunningNetwork["nodes"][
   const node = network.nodes.find((candidate) => candidate.id === id)
   if (node === undefined) throw new Error(`Missing test node ${id}`)
   return node
+}
+
+async function restartNode(
+  network: RunningNetwork,
+  node: RunningNetwork["nodes"][number],
+  environment: Record<string, string>,
+): Promise<RunningNetwork["nodes"][number]> {
+  const index = network.nodes.indexOf(node)
+  if (index < 0) throw new Error(`Missing restarted node ${node.id}`)
+  node.process.kill()
+  await node.process.exited
+  const eventLogPath = join(network.runDirectory, node.id, "events.jsonl")
+  const child = Bun.spawn({
+    cmd: [process.execPath, "run", "server.ts"],
+    cwd: node.directory,
+    env: {
+      ...process.env,
+      ...environment,
+      HUMMINGBIRDS_EVENT_LOG_PATH: eventLogPath,
+      HUMMINGBIRDS_NODE_ID: node.id,
+      HUMMINGBIRDS_PORT: new URL(node.url).port,
+      HUMMINGBIRDS_THREAD_ID_PATH: join(dirname(eventLogPath), "thread-id"),
+    },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const ready = parseReadyMessage(JSON.parse(await readFirstLine(child.stdout)))
+  if (ready.id !== node.id || ready.pid !== child.pid) {
+    child.kill()
+    await child.exited
+    throw new Error(`Restarted node ${node.id} announced the wrong identity`)
+  }
+  const restarted = { ...node, process: child, url: ready.url }
+  network.nodes[index] = restarted
+  return restarted
+}
+
+async function readFirstLine(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let text = ""
+  try {
+    for (;;) {
+      const part = await reader.read()
+      if (part.done) throw new Error("stdout closed before readiness")
+      text += decoder.decode(part.value, { stream: true })
+      const newline = text.indexOf("\n")
+      if (newline >= 0) return text.slice(0, newline)
+    }
+  } finally {
+    reader.releaseLock()
+  }
 }

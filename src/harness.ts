@@ -43,6 +43,7 @@ type AskResult = {
 
 const sourceDirectory = import.meta.dir
 const eventLogPathEnvironment = "HUMMINGBIRDS_EVENT_LOG_PATH"
+const threadIdPathEnvironment = "HUMMINGBIRDS_THREAD_ID_PATH"
 
 async function loadScenario(path: string): Promise<Scenario> {
   const scenario = parseScenario(JSON.parse(await readFile(path, "utf8")))
@@ -166,8 +167,12 @@ export async function stopNetwork(network: RunningNetwork): Promise<void> {
   await Promise.all(network.nodes.map((node) => node.process.exited))
   await Promise.all(
     network.nodes.map((node) => {
+      const reservedFiles = new Set([
+        join(node.directory, "events.jsonl"),
+        join(node.directory, "thread-id"),
+      ])
       return cp(node.directory, join(network.runDirectory, node.id), {
-        filter: (source) => resolve(source) !== join(node.directory, "events.jsonl"),
+        filter: (source) => !reservedFiles.has(resolve(source)),
         recursive: true,
       })
     }),
@@ -215,6 +220,7 @@ function spawnNode(
       ...process.env,
       ...environment,
       [eventLogPathEnvironment]: eventLogPath,
+      [threadIdPathEnvironment]: join(dirname(eventLogPath), "thread-id"),
       HUMMINGBIRDS_NODE_ID: runtime.id,
       HUMMINGBIRDS_PORT: "0",
     },

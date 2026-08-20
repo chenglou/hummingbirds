@@ -1,4 +1,4 @@
-import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -35,10 +35,12 @@ type CodexEvents = {
 }
 
 let sequence = 0
-let threadId: string | null = null
 let turnQueue: Promise<void> = Promise.resolve()
 const eventLogPathEnvironment = "HUMMINGBIRDS_EVENT_LOG_PATH"
+const threadIdPathEnvironment = "HUMMINGBIRDS_THREAD_ID_PATH"
 const eventLogPath = Bun.env[eventLogPathEnvironment] ?? "events.jsonl"
+const threadIdPath = requireEnvironment(threadIdPathEnvironment)
+await loadThreadId()
 
 export async function answerQuestion(
   question: string,
@@ -107,7 +109,7 @@ async function runQuestion(
 async function runCodex(question: string, context: AgentRequest): Promise<CodexResult> {
   const startedAt = performance.now()
   const capture = await createCodexCapture()
-  const resumedThreadId = threadId
+  const resumedThreadId = await loadThreadId()
   try {
     const command = [
       ...codexCommand(),
@@ -115,6 +117,7 @@ async function runCodex(question: string, context: AgentRequest): Promise<CodexR
     ]
     const childEnvironment = { ...process.env }
     delete childEnvironment[eventLogPathEnvironment]
+    delete childEnvironment[threadIdPathEnvironment]
     const child = Bun.spawn({
       cmd: command,
       cwd: process.cwd(),
@@ -149,14 +152,12 @@ async function runCodex(question: string, context: AgentRequest): Promise<CodexR
     let events: CodexEvents
     try {
       events = parseCodexEvents(stdout)
-      if (
-        resumedThreadId !== null &&
-        events.threadId !== null &&
-        events.threadId !== resumedThreadId
-      ) {
+      if (resumedThreadId !== null && events.threadId !== resumedThreadId) {
         throw new Error(`Codex resumed ${events.threadId} instead of ${resumedThreadId}`)
       }
-      if (events.threadId !== null) threadId = events.threadId
+      if (events.threadId !== null && resumedThreadId === null) {
+        await persistThreadId(events.threadId)
+      }
     } finally {
       if (capture.trace !== null) await writeFile(capture.trace.path, stdout)
     }
@@ -340,6 +341,28 @@ function eventBase(context: AgentRequest) {
 
 async function record(event: TraceEvent): Promise<void> {
   await appendFile(eventLogPath, `${JSON.stringify(event)}\n`)
+}
+
+async function loadThreadId(): Promise<string | null> {
+  const file = Bun.file(threadIdPath)
+  if (!(await file.exists())) return null
+  const value = await file.text()
+  if (value.length === 0 || value.trim() !== value) {
+    throw new Error("Persisted Codex thread ID is invalid")
+  }
+  return value
+}
+
+async function persistThreadId(value: string): Promise<void> {
+  const temporaryPath = `${threadIdPath}.tmp`
+  await writeFile(temporaryPath, value, { mode: 0o600 })
+  await rename(temporaryPath, threadIdPath)
+}
+
+function requireEnvironment(name: string): string {
+  const value = Bun.env[name]
+  if (value === undefined || value.length === 0) throw new Error(`${name} is required`)
+  return value
 }
 
 function errorMessage(error: unknown): string {

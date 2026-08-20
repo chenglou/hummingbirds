@@ -19,7 +19,7 @@ Unfinished directions from the exploration. These are options, not commitments; 
 
 - Scale the cleaned harness from three to 12–24 nodes across several topics, with cold-to-warm routing, one stale route, queued concurrent questions, and uneven load. Watch for emergent clusters, hubs, hierarchy, specialists, or router-like nodes before prescribing roles.
 - Test overload-driven node splitting and whether a specialty divides cleanly without central assignment.
-- Decide how a restarted bird recovers its exact continuing session without making identity depend on one process lifetime.
+- Give hosted birds durable workspaces and stable addresses around their persisted Codex sessions.
 
 ## Actual distribution
 

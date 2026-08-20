@@ -21,6 +21,9 @@ if (!process.argv.includes('sandbox_mode="workspace-write"')) {
 if (Bun.env["HUMMINGBIRDS_EVENT_LOG_PATH"] !== undefined) {
   throw new Error("The archive event path must remain private to the Bun server")
 }
+if (Bun.env["HUMMINGBIRDS_THREAD_ID_PATH"] !== undefined) {
+  throw new Error("The thread ID path must remain private to the Bun server")
+}
 
 const nodeId = requireEnvironment("HUMMINGBIRDS_NODE_ID")
 const nodeAddress = requireEnvironment("HUMMINGBIRDS_NODE_ADDRESS")
