@@ -52,47 +52,6 @@ export type TraceEvent =
       threadId: string | null
     })
   | (EventBase & {
-      apiCall: number
-      durationMs: number
-      kind: "api_completed"
-      request: JsonObject
-      response: JsonObject
-    })
-  | (EventBase & {
-      apiCall: number
-      durationMs: number
-      error: string
-      kind: "api_failed"
-      request: JsonObject
-      responseBody: string
-    })
-  | (EventBase & {
-      address: string
-      callId: string
-      kind: "peer_call_started"
-      question: string
-    })
-  | (EventBase & {
-      address: string
-      answer: string
-      callId: string
-      durationMs: number
-      kind: "peer_call_completed"
-      status: number
-    })
-  | (EventBase & {
-      address: string
-      callId: string
-      durationMs: number
-      error: string
-      kind: "peer_call_failed"
-    })
-  | (EventBase & {
-      after: string
-      before: string
-      kind: "nodes_replaced"
-    })
-  | (EventBase & {
       answer: string
       durationMs: number
       kind: "request_completed"

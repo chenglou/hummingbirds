@@ -185,17 +185,14 @@ async function runTrial(config: Config, prompt: string, trial: number) {
       HUMMINGBIRDS_CODEX_REASONING_EFFORT: reasoningEffort,
     })
     const node = requireNode(network, "a")
-    await Promise.all([
-      writeFile(join(node.directory, "prompt.md"), prompt),
-      writeFile(
-        join(node.directory, "AGENTS.md"),
-        prompt
-          .replaceAll("[id]", node.id)
-          .replaceAll("[address]", node.url)
-          .replaceAll("[peers]", `- slow-peer at ${peerUrl}`)
-          .replaceAll("[seed]", "(none)"),
-      ),
-    ])
+    await writeFile(
+      join(node.directory, "AGENTS.md"),
+      prompt
+        .replaceAll("[id]", node.id)
+        .replaceAll("[address]", node.url)
+        .replaceAll("[peers]", `- slow-peer at ${peerUrl}`)
+        .replaceAll("[seed]", "(none)"),
+    )
 
     const answer = await withTimeout(
       askNetwork(network, question, `slow-peer-${questionKey}`),

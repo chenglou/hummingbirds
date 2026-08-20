@@ -21,7 +21,7 @@ Pass several quoted questions to `run` to ask them sequentially on the same live
 
 Codex CLI authentication is reused; no API key is copied into a bird. Override the model, reasoning effort, or diagnostic reasoning summary with `HUMMINGBIRDS_CODEX_MODEL`, `HUMMINGBIRDS_CODEX_REASONING_EFFORT`, or `HUMMINGBIRDS_CODEX_REASONING_SUMMARY`.
 
-For agent-level debugging, set `HUMMINGBIRDS_CODEX_JSON_TRACE=1`. Each node then retains Codex's raw JSONL events, final message, and stderr under `codex-traces/`; `/ask` still returns only the final plain-text answer.
+For agent-level debugging, set `HUMMINGBIRDS_CODEX_JSON_TRACE=1`. Each node then retains Codex's raw JSONL events under `codex-traces/`; `/ask` still returns only the final plain-text answer.
 
 Prompt changes have an opt-in live slow-peer eval. It gives one Luna bird an in-memory peer with a fresh random answer, delays that answer past Codex's tool yield, and rejects duplicate or abandoned calls:
 
@@ -32,13 +32,7 @@ bun run eval:slow-peer --run-real-model \
 
 This eval makes real model calls and is deliberately separate from `bun test`.
 
-The abstract routing exploration runs without models or HTTP. It compares uniform, hard-choice, and success-weighted stochastic routing in matched worlds with and without useful topic structure:
-
-```sh
-bun run eval:routing
-```
-
-Nodes have bounded local peer and learned-fact memory. Answers are exact hidden tokens; successful return paths credit only immediate callees, while provider attribution lets callers discover untested peers. Seen and held-out probes separate answer caching from topic-level routing generalization. A query follows one non-repeating path, so it ends at an answer or dead end without an arbitrary hop limit. See the [methods and first results](evals/routing-simulation.md).
+The [archived abstract routing exploration](evals/routing-simulation.md) compared uniform, hard-choice, and success-weighted stochastic routing in a 10,000-node model. Its temporary simulator has been removed from the active tree now that the project has returned to live model-backed experiments.
 
 The [first live stateful-routing exploration](evals/live-routing.md) records the complementary model-backed results: useful broker hierarchy, conflict resolution, contextual self-answering, and clean route shortening across two interleaved topics.
 
@@ -50,7 +44,6 @@ Each live node workspace contains:
 server.ts
 agent.ts
 protocol.ts
-prompt.md
 AGENTS.md
 ```
 

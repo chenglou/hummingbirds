@@ -3,10 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "eval:routing": "bun run evals/routing-simulation.ts",
     "eval:slow-peer": "bun run evals/slow-peer.ts",
     "hummingbirds": "bun run src/cli.ts",
-    "ui:mock": "bun --port 4173 ./ui/mock.html",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --type-aware src tests evals",

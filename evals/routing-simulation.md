@@ -107,14 +107,8 @@ tests.
 - Without caching, weighted training averaged 169.2 calls. Distributed fact copies nearly
   halve repeated-work search, even with the same immutable source knowledge.
 
-## Reproduce
+## Archive
 
-```sh
-bun run eval:routing
-bun run eval:routing --peer-capacity 4
-bun run eval:routing --peer-capacity 16
-bun run eval:routing --fact-cache 0
-```
-
-Add `--json` to retain every seed-level summary for paired analysis. Generated reports are
-not checked in.
+The one-shot simulator and its tests were removed after this exploration so they would
+not become permanent product machinery. Their exact source remains available in Git
+commit `870a0c1`.

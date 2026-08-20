@@ -6,7 +6,7 @@ import {
   type TraceEvent,
 } from "./protocol.ts"
 
-export type ReadyMessage = {
+type ReadyMessage = {
   id: string
   pid: number
   url: string
@@ -55,7 +55,7 @@ export function parseTraceEvent(value: unknown): TraceEvent {
       return {
         ...base,
         agentPid: requireNumber(record, "agentPid"),
-        codexEvents: optionalString(record, "codexEvents"),
+        codexEvents: requireNullableString(record, "codexEvents"),
         kind,
         threadId: requireNullableString(record, "threadId"),
       }
@@ -76,59 +76,6 @@ export function parseTraceEvent(value: unknown): TraceEvent {
         exitCode: requireNumber(record, "exitCode"),
         kind,
         threadId: requireNullableString(record, "threadId"),
-      }
-    case "api_completed":
-      return {
-        ...base,
-        apiCall: requireNumber(record, "apiCall"),
-        durationMs: requireNumber(record, "durationMs"),
-        kind,
-        request: requireRecord(record["request"], "API request"),
-        response: requireRecord(record["response"], "API response"),
-      }
-    case "api_failed":
-      return {
-        ...base,
-        apiCall: requireNumber(record, "apiCall"),
-        durationMs: requireNumber(record, "durationMs"),
-        error: requireString(record, "error"),
-        kind,
-        request: requireRecord(record["request"], "API request"),
-        responseBody: requireString(record, "responseBody"),
-      }
-    case "peer_call_started":
-      return {
-        ...base,
-        address: requireString(record, "address"),
-        callId: requireString(record, "callId"),
-        kind,
-        question: requireString(record, "question"),
-      }
-    case "peer_call_completed":
-      return {
-        ...base,
-        address: requireString(record, "address"),
-        answer: requireString(record, "answer"),
-        callId: requireString(record, "callId"),
-        durationMs: requireNumber(record, "durationMs"),
-        kind,
-        status: requireNumber(record, "status"),
-      }
-    case "peer_call_failed":
-      return {
-        ...base,
-        address: requireString(record, "address"),
-        callId: requireString(record, "callId"),
-        durationMs: requireNumber(record, "durationMs"),
-        error: requireString(record, "error"),
-        kind,
-      }
-    case "nodes_replaced":
-      return {
-        ...base,
-        after: requireString(record, "after"),
-        before: requireString(record, "before"),
-        kind,
       }
     case "request_completed":
       return {
@@ -164,12 +111,5 @@ function requireNullableString(record: JsonObject, key: string): string | null {
   if (value !== null && typeof value !== "string") {
     throw new Error(`${key} must be a string or null`)
   }
-  return value
-}
-
-function optionalString(record: JsonObject, key: string): string | null {
-  const value = record[key]
-  if (value === undefined || value === null) return null
-  if (typeof value !== "string") throw new Error(`${key} must be a string or null`)
   return value
 }

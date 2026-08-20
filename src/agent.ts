@@ -4,7 +4,7 @@ import { join, resolve } from "node:path"
 
 import { type TraceEvent } from "./protocol.ts"
 
-export type AgentRequest = {
+type AgentRequest = {
   address: string
   callerId: string
   invocationId: string
@@ -25,10 +25,8 @@ type CodexResult =
 
 type CodexCapture = {
   answerPath: string
-  eventsPath: string | null
-  relativeEventsPath: string | null
-  stderrPath: string | null
-  temporaryDirectory: string | null
+  temporaryDirectory: string
+  trace: { path: string; relativePath: string } | null
 }
 
 type CodexEvents = {
@@ -80,18 +78,19 @@ async function runQuestion(
   context: AgentRequest,
   startedAt: number,
 ): Promise<AgentReply> {
+  const fail = async (error: string, status: number): Promise<AgentReply> => {
+    await record({
+      ...eventBase(context),
+      durationMs: performance.now() - startedAt,
+      error,
+      kind: "request_failed",
+      status,
+    })
+    return { body: error, status }
+  }
   try {
     const result = await runCodex(question, context)
-    if (!result.ok) {
-      await record({
-        ...eventBase(context),
-        durationMs: performance.now() - startedAt,
-        error: result.error,
-        kind: "request_failed",
-        status: 502,
-      })
-      return { body: result.error, status: 502 }
-    }
+    if (!result.ok) return fail(result.error, 502)
     await record({
       ...eventBase(context),
       answer: result.answer,
@@ -101,15 +100,7 @@ async function runQuestion(
     })
     return { body: result.answer, status: 200 }
   } catch (error) {
-    const message = errorMessage(error)
-    await record({
-      ...eventBase(context),
-      durationMs: performance.now() - startedAt,
-      error: message,
-      kind: "request_failed",
-      status: 500,
-    })
-    return { body: message, status: 500 }
+    return fail(errorMessage(error), 500)
   }
 }
 
@@ -145,7 +136,7 @@ async function runCodex(question: string, context: AgentRequest): Promise<CodexR
     await record({
       ...eventBase(context),
       agentPid: child.pid,
-      codexEvents: capture.relativeEventsPath,
+      codexEvents: capture.trace?.relativePath ?? null,
       kind: "codex_process_started",
       threadId: resumedThreadId,
     })
@@ -157,78 +148,52 @@ async function runCodex(question: string, context: AgentRequest): Promise<CodexR
     ])
     let events: CodexEvents
     try {
-      events = parseCodexEvents(stdout, (observedThreadId) => {
-        if (resumedThreadId !== null && observedThreadId !== resumedThreadId) {
-          throw new Error(`Codex resumed ${observedThreadId} instead of ${resumedThreadId}`)
-        }
-        threadId = observedThreadId
-      })
-    } finally {
-      if (capture.eventsPath !== null && capture.stderrPath !== null) {
-        await Promise.all([
-          writeFile(capture.eventsPath, stdout),
-          writeFile(capture.stderrPath, stderr),
-        ])
+      events = parseCodexEvents(stdout)
+      if (
+        resumedThreadId !== null &&
+        events.threadId !== null &&
+        events.threadId !== resumedThreadId
+      ) {
+        throw new Error(`Codex resumed ${events.threadId} instead of ${resumedThreadId}`)
       }
+      if (events.threadId !== null) threadId = events.threadId
+    } finally {
+      if (capture.trace !== null) await writeFile(capture.trace.path, stdout)
     }
     const durationMs = performance.now() - startedAt
     const observedThreadId = events.threadId
     const activeThreadId = observedThreadId ?? resumedThreadId
+    const fail = async (
+      error: string,
+      failedThreadId: string | null,
+    ): Promise<CodexResult> => {
+      await record({
+        ...eventBase(context),
+        agentPid: child.pid,
+        durationMs,
+        error,
+        exitCode,
+        kind: "codex_process_failed",
+        threadId: failedThreadId,
+      })
+      return { error, ok: false }
+    }
 
     if (exitCode !== 0) {
       const detail = stderr.trim()
       const error = `Codex exited with status ${exitCode}${detail.length === 0 ? "" : `: ${detail}`}`
-      await record({
-        ...eventBase(context),
-        agentPid: child.pid,
-        durationMs,
-        error,
-        exitCode,
-        kind: "codex_process_failed",
-        threadId: activeThreadId,
-      })
-      return { error, ok: false }
+      return fail(error, activeThreadId)
     }
     if (activeThreadId === null) {
-      const error = "Codex returned no thread ID."
-      await record({
-        ...eventBase(context),
-        agentPid: child.pid,
-        durationMs,
-        error,
-        exitCode,
-        kind: "codex_process_failed",
-        threadId: null,
-      })
-      return { error, ok: false }
+      return fail("Codex returned no thread ID.", null)
     }
     if (!events.turnCompleted) {
-      const error = "Codex did not complete its turn."
-      await record({
-        ...eventBase(context),
-        agentPid: child.pid,
-        durationMs,
-        error,
-        exitCode,
-        kind: "codex_process_failed",
-        threadId: activeThreadId,
-      })
-      return { error, ok: false }
+      return fail("Codex did not complete its turn.", activeThreadId)
     }
 
     const answer = (await readFile(capture.answerPath, "utf8")).trimEnd()
     if (answer.length === 0) {
-      const error = "Codex returned no answer."
-      await record({
-        ...eventBase(context),
-        agentPid: child.pid,
-        durationMs,
-        error,
-        exitCode,
-        kind: "codex_process_failed",
-        threadId: activeThreadId,
-      })
-      return { error, ok: false }
+      return fail("Codex returned no answer.", activeThreadId)
     }
 
     await record({
@@ -240,9 +205,7 @@ async function runCodex(question: string, context: AgentRequest): Promise<CodexR
     })
     return { answer, ok: true }
   } finally {
-    if (capture.temporaryDirectory !== null) {
-      await rm(capture.temporaryDirectory, { force: true, recursive: true })
-    }
+    await rm(capture.temporaryDirectory, { force: true, recursive: true })
   }
 }
 
@@ -312,34 +275,26 @@ function codexArguments(answerPath: string, resumedThreadId: string | null): str
 }
 
 async function createCodexCapture(): Promise<CodexCapture> {
+  let trace: CodexCapture["trace"] = null
   if (Bun.env["HUMMINGBIRDS_CODEX_JSON_TRACE"] === "1") {
     const directoryName = "codex-traces"
     const directory = resolve(directoryName)
     const captureId = crypto.randomUUID()
     await mkdir(directory, { recursive: true })
-    return {
-      answerPath: join(directory, `${captureId}.answer.txt`),
-      eventsPath: join(directory, `${captureId}.jsonl`),
-      relativeEventsPath: join(directoryName, `${captureId}.jsonl`),
-      stderrPath: join(directory, `${captureId}.stderr.log`),
-      temporaryDirectory: null,
+    trace = {
+      path: join(directory, `${captureId}.jsonl`),
+      relativePath: join(directoryName, `${captureId}.jsonl`),
     }
   }
-
-  const directory = await mkdtemp(join(tmpdir(), "hummingbirds-codex-"))
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "hummingbirds-codex-"))
   return {
-    answerPath: join(directory, "answer.txt"),
-    eventsPath: null,
-    relativeEventsPath: null,
-    stderrPath: null,
-    temporaryDirectory: directory,
+    answerPath: join(temporaryDirectory, "answer.txt"),
+    temporaryDirectory,
+    trace,
   }
 }
 
-function parseCodexEvents(
-  text: string,
-  rememberThreadId: (threadId: string) => void,
-): CodexEvents {
+function parseCodexEvents(text: string): CodexEvents {
   let observedThreadId: string | null = null
   let turnCompleted = false
   for (const line of text.split("\n")) {
@@ -358,7 +313,6 @@ function parseCodexEvents(
         if (observedThreadId !== null && observedThreadId !== value) {
           throw new Error("Codex emitted multiple thread IDs")
         }
-        if (observedThreadId === null) rememberThreadId(value)
         observedThreadId = value
         break
       }
