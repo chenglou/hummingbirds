@@ -118,9 +118,11 @@ export function startInbox(): Inbox {
     hostname: "127.0.0.1",
     port: 0,
     fetch: async (request) => {
+      const body = await request.text()
+      if (body.trim() === "") return new Response("Empty message.", { status: 400 })
       messages.push({
         at: Date.now(),
-        body: await request.text(),
+        body,
         from: request.headers.get("x-hummingbirds-caller-id") ?? "unknown",
         inReplyTo: request.headers.get("x-hummingbirds-in-reply-to"),
       })

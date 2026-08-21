@@ -91,6 +91,12 @@ async function handleRequest(request: Request): Promise<Response> {
   const question = await request.text()
   record(context, "received", { question })
 
+  // Usually a reply whose body never made it into curl; better to hear about it now.
+  if (question.trim() === "") {
+    record(context, "rejected", { error: "Empty message" })
+    return reply(400, "Empty message.", context)
+  }
+
   // A question that already went through this bird is a cycle. A reply is not a
   // question, so whatever path it carries is fine.
   if (inReplyTo === null && context.path.includes(nodeId)) {

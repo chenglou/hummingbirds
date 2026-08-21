@@ -345,6 +345,16 @@ describe("Hummingbirds", () => {
         ["a", "c"],
       ])
 
+      // An empty body is almost always a reply that never made it into curl.
+      const empty = await fetch(a.url, {
+        method: "POST",
+        headers: { "x-hummingbirds-in-reply-to": "q-probe" },
+        body: "",
+      })
+      expect([empty.status, await empty.text()]).toEqual([400, "Empty message."])
+      expect((await fetch(inbox.url, { method: "POST", body: " \n" })).status).toBe(400)
+      expect(inbox.messages).toHaveLength(2)
+
       // Waiting on the line still works in the same flock.
       expect(await askNetwork(network, trainingQuestion, "q-sync")).toEqual({
         answer: `Amber Tern-417.\n\nContributors: c at ${c.url}`,
