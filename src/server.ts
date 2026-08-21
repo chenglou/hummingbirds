@@ -98,20 +98,23 @@ async function handleRequest(request: Request): Promise<Response> {
     return reply(409, `Cycle rejected at ${nodeId}.`, context)
   }
 
-  const turn = runTurn(question, context)
-  if (context.replyTo === null && inReplyTo === null) return turn
-  // Nobody is waiting on the line for a reply, or for a question that asks to be
-  // answered at a Reply-to address: let go of the socket and let the turn run.
+  // Someone is waiting on the line only for a plain question. A reply, or a question
+  // that asks to be answered at a Reply-to address, gets a 202 right away and its turn
+  // runs on its own; the bird POSTs whatever it has to say.
+  const waiting = context.replyTo === null && inReplyTo === null
+  const turn = runTurn(question, context, waiting)
+  if (waiting) return turn
   void turn
   return reply(202, `Accepted by ${nodeId}.`, context)
 }
 
-async function runTurn(question: string, context: Context): Promise<Response> {
+async function runTurn(question: string, context: Context, waiting: boolean): Promise<Response> {
   // One Codex turn at a time: the conversation is a single thread.
   const turn = queue.then(() => ask(question, context))
   queue = turn.catch(() => {})
   try {
     const { answer, threadId } = await turn
+    if (waiting && answer === "") throw new Error("Codex produced no answer")
     record(context, "completed", { answer, status: 200, threadId })
     return reply(200, answer, context)
   } catch (error) {
@@ -191,8 +194,8 @@ async function ask(
   if (threadId !== null && startedThreadId !== threadId) {
     throw new Error(`Codex resumed thread ${startedThreadId} instead of ${threadId}`)
   }
-  if (answer === null || answer === "") throw new Error("Codex produced no answer")
-  return { answer, threadId: startedThreadId }
+  // An empty final message is fine when the bird already POSTed its reply.
+  return { answer: answer ?? "", threadId: startedThreadId }
 }
 
 // What Codex reads: who sent the message, which request it belongs to, where the

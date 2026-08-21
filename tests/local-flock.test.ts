@@ -247,6 +247,20 @@ describe("Hummingbirds", () => {
         ["--search", "exec", "resume", ...common, ...extra, threadId, "-"],
       ])
 
+      // Saying nothing is only an error when someone is waiting on the line.
+      const silent = await spawnNode(join(directory, "silent"), {
+        ...fakeCodex,
+        HUMMINGBIRDS_FAKE_SILENT: "1",
+      })
+      try {
+        await writeFile(join(silent.directory, "workspace", "AGENTS.md"), "")
+        const response = await fetch(silent.url, { method: "POST", body: "anyone there?" })
+        expect([response.status, await response.text()]).toEqual([500, "Codex produced no answer"])
+      } finally {
+        silent.process.kill()
+        await silent.process.exited
+      }
+
       // An empty thread-id file is corrupt state, not a fresh bird: fail, don't fork.
       await writeFile(join(solo.directory, "thread-id"), "")
       const third = await askNetwork(network, "third")
@@ -314,7 +328,7 @@ describe("Hummingbirds", () => {
         trace
           .filter((event) => event.kind === "completed" && event.nodeId === "a")
           .map((event) => event.answer),
-      ).toEqual(["Asked a peer about q-train; waiting.", `Relayed q-train to ${inbox.url}.`])
+      ).toEqual(["Asked a peer about q-train; waiting.", ""])
 
       // The relayed reply named c, so a now asks c directly, still without waiting.
       const probe = await askNetworkAsync(network, inbox, probeQuestion, "q-probe", 10_000)

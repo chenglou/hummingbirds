@@ -44,7 +44,7 @@ if (inReplyTo !== undefined) {
   delete session.pending[inReplyTo]
   learnContributors(session.peers, question)
   await post(askedBy, question, { "x-hummingbirds-in-reply-to": inReplyTo })
-  answer = `Relayed ${inReplyTo} to ${askedBy}.`
+  answer = "" // Like the real Codex, nothing more to say after POSTing the reply.
 } else {
   const requestId = envelope["Request"] ?? ""
   const privateAnswer = answerFromPrivateKnowledge(agents, question)
@@ -68,9 +68,10 @@ if (inReplyTo !== undefined) {
   else if (replyTo === undefined) answer = found
   else {
     await post(replyTo, found, { "x-hummingbirds-in-reply-to": requestId })
-    answer = `Replied to ${replyTo}.`
+    answer = ""
   }
 }
+if (Bun.env["HUMMINGBIRDS_FAKE_SILENT"] === "1") answer = ""
 
 await mkdir(".fake-codex", { recursive: true })
 await writeFile(sessionPath(session.threadId), `${JSON.stringify(session, null, 2)}\n`)
