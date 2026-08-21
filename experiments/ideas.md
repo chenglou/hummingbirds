@@ -33,5 +33,5 @@ Unfinished directions from the exploration. These are options, not commitments; 
 
 ## Harness cleanup
 
-- Define abrupt shutdown: drain or terminate active Codex descendants before archiving, rather than deleting a workspace under an unfinished turn.
-- Strengthen eval-only privacy only if later birds defeat the separated runtime roots by scanning global temporary directories, source scenarios, or shared Codex state.
+- Define abrupt shutdown: `stopNetwork` kills a bird's server but not a Codex turn still in flight; decide whether to drain or terminate descendants.
+- Local birds can read each other's directories (the sandbox restricts writes, not reads). Separate them only if a bird starts cheating by reading a sibling's seed, events, or shared Codex state.

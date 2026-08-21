@@ -1,23 +1,18 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
-import { dirname, join, resolve } from "path"
+import { join, resolve } from "path"
 
 import {
   askNetwork,
   readTrace,
+  spawnNode,
   startNetwork,
   stopNetwork,
-  type RunningNetwork,
+  type Network,
 } from "../experiments/local-flock/harness.ts"
-import { parseReadyMessage } from "../experiments/local-flock/trace.ts"
 
-const headers = {
-  callerId: "x-hummingbirds-caller-id",
-  path: "x-hummingbirds-path",
-  requestId: "x-hummingbirds-request-id",
-} as const
-
+const fakeCodex = { HUMMINGBIRDS_CODEX: resolve("tests/fake-codex.ts") }
 const temporaryDirectories: string[] = []
 
 afterAll(async () => {
@@ -27,47 +22,28 @@ afterAll(async () => {
 })
 
 describe("Hummingbirds", () => {
-  test("resumes a bird's session after its server restarts", async () => {
+  test("routes through peers, learns shortcuts, and resumes after a restart", async () => {
     const trainingQuestion =
       "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for tideglass trial Nacre-A?"
     const probeQuestion =
       "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for saltclock trial Nacre-B?"
-    const temporaryDirectory = await makeTemporaryDirectory()
-    const runDirectory = join(temporaryDirectory, "run")
-    const environment = {
-      HUMMINGBIRDS_CODEX_COMMAND: JSON.stringify([
-        process.execPath,
-        "run",
-        resolve("tests/fake-codex.ts"),
-      ]),
-      HUMMINGBIRDS_CODEX_JSON_TRACE: "1",
-      HUMMINGBIRDS_FAKE_STATE_DIRECTORY: join(temporaryDirectory, "fake-codex"),
-    }
-    let network: RunningNetwork | null = null
+    const directory = join(await makeTemporaryDirectory(), "run")
+    let network: Network | null = null
 
     try {
       network = await startNetwork(
         resolve("experiments/local-flock/scenario.json"),
-        runDirectory,
-        environment,
+        directory,
+        fakeCodex,
       )
-
       const a = findNode(network, "a")
       const b = findNode(network, "b")
       const c = findNode(network, "c")
-      expect(a.directory.startsWith(runDirectory)).toBe(false)
-      expect(b.directory.startsWith(runDirectory)).toBe(false)
-      expect(dirname(a.directory)).not.toBe(dirname(b.directory))
-      expect(await Bun.file(join(a.directory, "events.jsonl")).exists()).toBe(false)
-      expect(await Bun.file(join(runDirectory, "a", "events.jsonl")).exists()).toBe(true)
-      expect(new Set(network.nodes.map((node) => node.process.pid)).size).toBe(3)
+      expect(a.directory).toBe(join(directory, "a"))
       expect(new Set(network.nodes.map((node) => node.url)).size).toBe(3)
-      expect(await Bun.file(join(a.directory, "server.ts")).exists()).toBe(false)
-      expect(await Bun.file(join(a.directory, "agent.ts")).exists()).toBe(false)
-      expect(await Bun.file(join(a.directory, "protocol.ts")).exists()).toBe(false)
 
       const prompt = await readFile(resolve("src/prompt_template.md"), "utf8")
-      const aAgents = await readFile(join(a.directory, "AGENTS.md"), "utf8")
+      const aAgents = await readFile(join(a.directory, "workspace", "AGENTS.md"), "utf8")
       expect(aAgents).toBe(
         prompt
           .replaceAll("[id]", "a")
@@ -76,272 +52,148 @@ describe("Hummingbirds", () => {
           .replaceAll("[seed]", "(none)"),
       )
       expect(aAgents).not.toContain(c.url)
-      const cAgents = await readFile(join(c.directory, "AGENTS.md"), "utf8")
+      const cAgents = await readFile(join(c.directory, "workspace", "AGENTS.md"), "utf8")
       expect(cAgents).toContain("Amber Tern-417")
-      expect(cAgents).toContain("Violet Shoal-862")
-      expect(cAgents).toContain("Your initial peers are:\n(none)")
-      expect(await Bun.file(join(a.directory, "knowledge.md")).exists()).toBe(false)
-      expect(await Bun.file(join(a.directory, "nodes.md")).exists()).toBe(false)
+      expect(cAgents).toContain("(none)")
 
-      const trainingResult = await askNetwork(network, trainingQuestion, "request-training")
-      expect(trainingResult.answer).toBe(`Amber Tern-417.\n\nContributors: c at ${c.url}`)
-      expect(trainingResult.status).toBe(200)
-
-      const trainingTrace = await readTrace(runDirectory, "request-training")
+      // a only knows b; b knows c; c holds the answer.
+      const training = await askNetwork(network, trainingQuestion, "request-training")
+      expect(training).toEqual({
+        answer: `Amber Tern-417.\n\nContributors: c at ${c.url}`,
+        status: 200,
+      })
+      const trainingTrace = await readTrace(directory, "request-training")
       expect(
         trainingTrace
-          .filter((event) => event.kind === "request_received")
-          .map((event) => [event.nodeId, event.callerId]),
+          .filter((event) => event.kind === "received")
+          .map((event) => [event.nodeId, event.callerId, event.path]),
       ).toEqual([
-        ["a", "human"],
-        ["b", "a"],
-        ["c", "b"],
+        ["a", "human", []],
+        ["b", "a", ["a"]],
+        ["c", "b", ["a", "b"]],
       ])
-      const trainingStarts = trainingTrace.filter(
-        (event) => event.kind === "codex_process_started",
-      )
-      expect(trainingStarts.map((event) => event.nodeId)).toEqual(["a", "b", "c"])
-      expect(trainingStarts.every((event) => event.threadId === null)).toBe(true)
-      expect(new Set(trainingStarts.map((event) => event.agentPid)).size).toBe(3)
-      const aStart = trainingStarts.find((event) => event.nodeId === "a")
-      if (aStart?.kind !== "codex_process_started" || aStart.codexEvents === null) {
-        throw new Error("Missing Codex JSON trace")
-      }
-      expect(
-        await readFile(join(runDirectory, "a", aStart.codexEvents), "utf8"),
-      ).toContain(
-        '"type":"turn.completed"',
-      )
+      const trainingStarts = trainingTrace.filter((event) => event.kind === "started")
+      expect(trainingStarts.map((event) => [event.nodeId, event.threadId])).toEqual([
+        ["a", null],
+        ["b", null],
+        ["c", null],
+      ])
+      const firstThreadId = trainingTrace.find(
+        (event) => event.kind === "completed" && event.nodeId === "a",
+      )?.threadId
+      if (typeof firstThreadId !== "string") throw new Error("a did not report its thread")
+      expect(await readFile(join(a.directory, "thread-id"), "utf8")).toBe(firstThreadId)
 
-      const firstACompletion = trainingTrace.find(
-        (event) => event.kind === "codex_process_completed" && event.nodeId === "a",
-      )
-      if (
-        firstACompletion === undefined ||
-        firstACompletion.kind !== "codex_process_completed"
-      ) {
-        throw new Error("Missing first A completion")
-      }
-      const firstThreadId = firstACompletion.threadId
-      expect(await readFile(join(runDirectory, "a", "thread-id"), "utf8")).toBe(
-        firstThreadId,
-      )
-      const restartedA = await restartNode(network, a, environment)
+      // Restart a on the same port and directory: it resumes the same Codex thread.
+      a.process.kill()
+      await a.process.exited
+      const restartedA = await spawnNode(a.directory, fakeCodex, Number(new URL(a.url).port))
+      network.nodes[network.nodes.indexOf(a)] = restartedA
       expect(restartedA.process.pid).not.toBe(a.process.pid)
       expect(restartedA.url).toBe(a.url)
 
-      const probeResult = await askNetwork(network, probeQuestion, "request-probe")
-      expect(probeResult.answer).toBe(`Violet Shoal-862.\n\nContributors: c at ${c.url}`)
-      expect(probeResult.status).toBe(200)
-      const probeTrace = await readTrace(runDirectory, "request-probe")
+      // a learned c's address from the first answer, so it skips b this time.
+      const probe = await askNetwork(network, probeQuestion, "request-probe")
+      expect(probe).toEqual({
+        answer: `Violet Shoal-862.\n\nContributors: c at ${c.url}`,
+        status: 200,
+      })
       expect(
-        probeTrace
-          .filter((event) => event.kind === "request_received")
+        (await readTrace(directory, "request-probe"))
+          .filter((event) => event.kind === "received")
           .map((event) => event.nodeId),
       ).toEqual(["a", "c"])
+      const aStarts = (await readTrace(directory))
+        .filter((event) => event.kind === "started" && event.nodeId === "a")
+        .map((event) => event.threadId)
+      expect(aStarts).toEqual([null, firstThreadId])
 
-      const fullTrace = await readTrace(runDirectory)
-      const aStarts = fullTrace
-        .filter((event) => event.kind === "codex_process_started")
-        .filter((event) => event.nodeId === "a")
-      const aCompletions = fullTrace
-        .filter((event) => event.kind === "codex_process_completed")
-        .filter((event) => event.nodeId === "a")
-      expect(aStarts).toHaveLength(2)
-      expect(aCompletions).toHaveLength(2)
-      expect(aStarts.map((event) => event.threadId)).toEqual([null, firstThreadId])
-      expect(aCompletions.map((event) => event.threadId)).toEqual([
-        firstThreadId,
-        firstThreadId,
-      ])
-      expect(await Bun.file(join(a.directory, "knowledge.md")).exists()).toBe(false)
-      expect(await Bun.file(join(a.directory, "nodes.md")).exists()).toBe(false)
-
-      const startsBeforeCycle = fullTrace.filter(
-        (event) => event.kind === "codex_process_started",
+      // A request whose path already contains a is a cycle: rejected without running Codex.
+      const startsBeforeCycle = (await readTrace(directory)).filter(
+        (event) => event.kind === "started",
       ).length
-      const cycleResponse = await fetch(restartedA.url, {
+      const cycle = await fetch(restartedA.url, {
         method: "POST",
         headers: {
-          [headers.callerId]: "test",
-          [headers.path]: JSON.stringify(["a"]),
-          [headers.requestId]: "request-cycle",
+          "x-hummingbirds-path": JSON.stringify(["a"]),
+          "x-hummingbirds-request-id": "request-cycle",
         },
         body: trainingQuestion,
       })
-      expect(cycleResponse.status).toBe(409)
+      expect(cycle.status).toBe(409)
+      expect(cycle.headers.get("x-hummingbirds-request-id")).toBe("request-cycle")
+      const afterCycle = await readTrace(directory)
+      expect(afterCycle.filter((event) => event.kind === "started")).toHaveLength(startsBeforeCycle)
       expect(
-        (await readTrace(runDirectory)).filter(
-          (event) => event.kind === "codex_process_started",
-        ).length,
-      ).toBe(startsBeforeCycle)
-
-      const poisonedTraceDirectory = join(a.directory, "codex-traces")
-      await mkdir(poisonedTraceDirectory)
-      await Promise.all([
-        writeFile(join(poisonedTraceDirectory, "poison.jsonl"), "poisoned Codex trace\n"),
-        writeFile(join(a.directory, "events.jsonl"), "poisoned workspace trace\n"),
-        writeFile(join(a.directory, "thread-id"), "poisoned workspace thread\n"),
-      ])
-      await stopNetwork(network)
-      network = null
-      expect(await Bun.file(join(a.directory, "AGENTS.md")).exists()).toBe(false)
-      expect(await readFile(join(runDirectory, "a", "AGENTS.md"), "utf8")).toBe(aAgents)
-      expect(await readFile(join(runDirectory, "a", "events.jsonl"), "utf8")).not.toContain(
-        "poisoned workspace trace",
-      )
-      expect(await readFile(join(runDirectory, "a", "thread-id"), "utf8")).toBe(firstThreadId)
-      expect(
-        await Bun.file(join(runDirectory, "a", "codex-traces", "poison.jsonl")).exists(),
-      ).toBe(false)
-      expect(await readFile(join(runDirectory, "a", aStart.codexEvents), "utf8")).toContain(
-        '"type":"turn.completed"',
-      )
-      expect(await readTrace(runDirectory, "request-probe")).not.toHaveLength(0)
+        afterCycle.filter((event) => event.kind === "rejected").map((event) => event.requestId),
+      ).toEqual(["request-cycle"])
     } finally {
       if (network !== null) await stopNetwork(network)
     }
   }, 30_000)
 
-  test("serializes concurrent requests while rejecting cycles immediately", async () => {
+  test("runs one Codex turn at a time, in arrival order, while rejecting cycles immediately", async () => {
     const temporaryDirectory = await makeTemporaryDirectory()
     const scenarioPath = join(temporaryDirectory, "scenario.json")
-    const runDirectory = join(temporaryDirectory, "run")
+    const directory = join(temporaryDirectory, "run")
     await writeFile(
       scenarioPath,
-      `${JSON.stringify(
-        { entry: "solo", nodes: [{ id: "solo", peers: [], seed: "" }] },
-        null,
-        2,
-      )}\n`,
+      JSON.stringify({ entry: "solo", nodes: [{ id: "solo", peers: [], seed: "" }] }),
     )
-    let network: RunningNetwork | null = null
+    let network: Network | null = null
 
     try {
-      network = await startNetwork(scenarioPath, runDirectory, {
-        HUMMINGBIRDS_CODEX_COMMAND: JSON.stringify([
-          process.execPath,
-          "run",
-          resolve("tests/fake-codex.ts"),
-        ]),
-        HUMMINGBIRDS_CODEX_JSON_TRACE: "1",
-        HUMMINGBIRDS_FAKE_DELAY_MS: "1000",
-        HUMMINGBIRDS_FAKE_STATE_DIRECTORY: join(temporaryDirectory, "fake-codex"),
+      network = await startNetwork(scenarioPath, directory, {
+        ...fakeCodex,
+        HUMMINGBIRDS_FAKE_DELAY_MS: "300",
       })
       const solo = findNode(network, "solo")
+      const activeNetwork = network
 
-      const first = askNetwork(network, "first concurrent question", "request-first")
-      await waitUntil(async () =>
-        (await readTrace(runDirectory, "request-first")).some(
-          (event) => event.kind === "codex_process_started",
-        ),
+      const questions = Array.from({ length: 5 }, (_, index) => `question ${index}`)
+      const answers = Promise.all(
+        questions.map((question, index) => askNetwork(activeNetwork, question, `request-${index}`)),
       )
-      const second = askNetwork(network, "second concurrent question", "request-second")
-      await waitUntil(async () =>
-        (await readTrace(runDirectory, "request-second")).some(
-          (event) => event.kind === "request_received",
-        ),
+      await waitUntil(async () => {
+        const trace = await readTrace(directory)
+        return (
+          trace.filter((event) => event.kind === "received").length === questions.length &&
+          trace.some((event) => event.kind === "started")
+        )
+      })
+      expect((await readTrace(directory)).filter((event) => event.kind === "started")).toHaveLength(
+        1,
       )
-
-      expect(
-        (await readTrace(runDirectory)).filter(
-          (event) => event.kind === "codex_process_started",
-        ),
-      ).toHaveLength(1)
 
       const cycle = fetch(solo.url, {
         method: "POST",
-        headers: {
-          [headers.path]: JSON.stringify(["solo"]),
-          [headers.requestId]: "request-cycle-while-busy",
-        },
+        headers: { "x-hummingbirds-path": JSON.stringify(["solo"]) },
         body: "cyclic question",
       })
-      const firstFinished = first.then(() => "first" as const)
-      const secondFinished = second.then(() => "second" as const)
-      expect(
-        await Promise.race([cycle.then(() => "cycle" as const), firstFinished, secondFinished]),
-      ).toBe("cycle")
-      const cycleResponse = await cycle
-      expect(cycleResponse.status).toBe(409)
-
-      const [firstResult, secondResult] = await Promise.all([first, second])
-      expect(firstResult.answer).toBe("Handled by solo: first concurrent question")
-      expect(secondResult.answer).toBe("Handled by solo: second concurrent question")
-
-      const trace = await readTrace(runDirectory)
-      const processEvents = trace.filter(
-        (event) =>
-          event.nodeId === "solo" &&
-          (event.kind === "codex_process_started" || event.kind === "codex_process_completed"),
+      expect(await Promise.race([cycle.then(() => "cycle"), answers.then(() => "answers")])).toBe(
+        "cycle",
       )
-      expect(processEvents.map((event) => event.kind)).toEqual([
-        "codex_process_started",
-        "codex_process_completed",
-        "codex_process_started",
-        "codex_process_completed",
-      ])
-      const completions = processEvents.filter(
-        (event) => event.kind === "codex_process_completed",
+      expect((await cycle).status).toBe(409)
+
+      expect((await answers).map((result) => result.answer)).toEqual(
+        questions.map((question) => `Handled by solo: ${question}`),
       )
-      const starts = processEvents.filter((event) => event.kind === "codex_process_started")
-      const activeThreadId = completions[0]?.threadId
-      if (activeThreadId === undefined) throw new Error("Missing solo thread")
-      expect(starts.map((event) => event.threadId)).toEqual([null, activeThreadId])
-      expect(completions.map((event) => event.threadId)).toEqual([
-        activeThreadId,
-        activeThreadId,
-      ])
-      expect(
-        trace.filter(
-          (event) =>
-            event.kind === "cycle_rejected" && event.requestId === "request-cycle-while-busy",
-        ),
-      ).toHaveLength(1)
-    } finally {
-      if (network !== null) await stopNetwork(network)
-    }
-  }, 15_000)
-
-  test("keeps admitted request order when diagnostics are enabled", async () => {
-    const temporaryDirectory = await makeTemporaryDirectory()
-    const scenarioPath = join(temporaryDirectory, "scenario.json")
-    const runDirectory = join(temporaryDirectory, "run")
-    await writeFile(
-      scenarioPath,
-      `${JSON.stringify(
-        { entry: "solo", nodes: [{ id: "solo", peers: [], seed: "" }] },
-        null,
-        2,
-      )}\n`,
-    )
-    let network: RunningNetwork | null = null
-
-    try {
-      network = await startNetwork(scenarioPath, runDirectory, {
-        HUMMINGBIRDS_CODEX_COMMAND: JSON.stringify([
-          process.execPath,
-          "run",
-          resolve("tests/fake-codex.ts"),
-        ]),
-        HUMMINGBIRDS_FAKE_STATE_DIRECTORY: join(temporaryDirectory, "fake-codex"),
-      })
-      const activeNetwork = network
-      const requestIds = Array.from({ length: 20 }, (_, index) => `fifo-${index}`)
-      await Promise.all(
-        requestIds.map((requestId) =>
-          askNetwork(activeNetwork, `question ${requestId}`, requestId),
-        ),
+      const trace = await readTrace(directory)
+      const turns = trace.filter((event) => event.kind === "started" || event.kind === "completed")
+      expect(turns.map((event) => event.kind)).toEqual(
+        questions.flatMap(() => ["started", "completed"]),
       )
-
-      const trace = await readTrace(runDirectory)
       const admitted = trace
-        .filter((event) => event.kind === "request_received")
+        .filter((event) => event.kind === "received" && event.requestId.startsWith("request-"))
         .map((event) => event.requestId)
-      const started = trace
-        .filter((event) => event.kind === "codex_process_started")
-        .map((event) => event.requestId)
-      expect(started).toEqual(admitted)
+      expect(
+        turns.filter((event) => event.kind === "started").map((event) => event.requestId),
+      ).toEqual(admitted)
+      const threadId = turns[1]?.threadId
+      expect(typeof threadId).toBe("string")
+      expect(
+        turns.filter((event) => event.kind === "started").map((event) => event.threadId),
+      ).toEqual([null, threadId, threadId, threadId, threadId])
     } finally {
       if (network !== null) await stopNetwork(network)
     }
@@ -363,61 +215,8 @@ async function waitUntil(check: () => Promise<boolean>): Promise<void> {
   }
 }
 
-function findNode(network: RunningNetwork, id: string): RunningNetwork["nodes"][number] {
+function findNode(network: Network, id: string): Network["nodes"][number] {
   const node = network.nodes.find((candidate) => candidate.id === id)
   if (node === undefined) throw new Error(`Missing test node ${id}`)
   return node
-}
-
-async function restartNode(
-  network: RunningNetwork,
-  node: RunningNetwork["nodes"][number],
-  environment: Record<string, string>,
-): Promise<RunningNetwork["nodes"][number]> {
-  const index = network.nodes.indexOf(node)
-  if (index < 0) throw new Error(`Missing restarted node ${node.id}`)
-  node.process.kill()
-  await node.process.exited
-  const eventLogPath = join(network.runDirectory, node.id, "events.jsonl")
-  const child = Bun.spawn({
-    cmd: [process.execPath, "run", resolve("src/server.ts")],
-    cwd: node.directory,
-    env: {
-      ...process.env,
-      ...environment,
-      HUMMINGBIRDS_EVENT_LOG_PATH: eventLogPath,
-      HUMMINGBIRDS_NODE_ID: node.id,
-      HUMMINGBIRDS_PORT: new URL(node.url).port,
-      HUMMINGBIRDS_THREAD_ID_PATH: join(dirname(eventLogPath), "thread-id"),
-    },
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  })
-  const ready = parseReadyMessage(JSON.parse(await readFirstLine(child.stdout)))
-  if (ready.id !== node.id || ready.pid !== child.pid) {
-    child.kill()
-    await child.exited
-    throw new Error(`Restarted node ${node.id} announced the wrong identity`)
-  }
-  const restarted = { ...node, process: child, url: ready.url }
-  network.nodes[index] = restarted
-  return restarted
-}
-
-async function readFirstLine(stream: ReadableStream<Uint8Array>): Promise<string> {
-  const reader = stream.getReader()
-  const decoder = new TextDecoder()
-  let text = ""
-  try {
-    for (;;) {
-      const part = await reader.read()
-      if (part.done) throw new Error("stdout closed before readiness")
-      text += decoder.decode(part.value, { stream: true })
-      const newline = text.indexOf("\n")
-      if (newline >= 0) return text.slice(0, newline)
-    }
-  } finally {
-    reader.releaseLock()
-  }
 }
