@@ -1,6 +1,7 @@
 // Starts a flock of birds on this machine from a scenario file, asks the entry
-// bird questions, and reads the merged event logs back. Each bird lives in
-// <directory>/<id>/ exactly as it would on its own machine.
+// bird questions (waiting on the line, or through an inbox the birds reply to),
+// and reads the merged event logs back. Each bird lives in <directory>/<id>/
+// exactly as it would on its own machine.
 import { mkdir, readdir, readFile, writeFile } from "fs/promises"
 import { join, resolve } from "path"
 
@@ -19,8 +20,23 @@ export type Node = {
 }
 
 export type Network = {
+  directory: string
   entry: string
   nodes: Node[]
+}
+
+// A message a bird POSTed to the human's inbox.
+export type InboxMessage = {
+  at: number
+  body: string
+  from: string
+  inReplyTo: string | null
+}
+
+export type Inbox = {
+  messages: InboxMessage[]
+  stop: () => void
+  url: string
 }
 
 const serverPath = resolve(import.meta.dir, "../../src/server.ts")
@@ -52,7 +68,7 @@ export async function startNetwork(
         .replaceAll("[seed]", seed.seed === "" ? "(none)" : seed.seed),
     )
   }
-  return { entry: scenario.entry, nodes }
+  return { directory: resolve(directory), entry: scenario.entry, nodes }
 }
 
 export async function spawnNode(
@@ -93,6 +109,77 @@ export async function askNetwork(
     body: question,
   })
   return { answer: await response.text(), status: response.status }
+}
+
+// The human as a node: an address birds can POST replies to.
+export function startInbox(): Inbox {
+  const messages: InboxMessage[] = []
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      messages.push({
+        at: Date.now(),
+        body: await request.text(),
+        from: request.headers.get("x-hummingbirds-caller-id") ?? "unknown",
+        inReplyTo: request.headers.get("x-hummingbirds-in-reply-to"),
+      })
+      return new Response("Accepted by human.", { status: 202 })
+    },
+  })
+  return {
+    messages,
+    stop: () => void server.stop(true),
+    url: `http://127.0.0.1:${server.port}/inbox`,
+  }
+}
+
+// Ask without waiting on the line: the entry bird gets the inbox as Reply-to and
+// answers 202 right away. Resolves once no bird has anything left to do, with
+// whatever replies reached the inbox for this request by then.
+export async function askNetworkAsync(
+  network: Network,
+  inbox: Inbox,
+  question: string,
+  requestId: string,
+  timeoutMs = 600_000,
+): Promise<{ replies: InboxMessage[]; status: number }> {
+  const response = await fetch(findNode(network.nodes, network.entry).url, {
+    method: "POST",
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      "x-hummingbirds-caller-id": "human",
+      "x-hummingbirds-reply-to": inbox.url,
+      "x-hummingbirds-request-id": requestId,
+    },
+    body: question,
+  })
+  const status = response.status
+  if (status !== 202)
+    return {
+      replies: [
+        { at: Date.now(), body: await response.text(), from: network.entry, inReplyTo: null },
+      ],
+      status,
+    }
+  await waitUntilIdle(network, timeoutMs)
+  return { replies: inbox.messages.filter((message) => message.inReplyTo === requestId), status }
+}
+
+// Every request a bird received has been rejected, completed or failed. A bird
+// records a request before answering 202, so nothing can be in flight either.
+export async function waitUntilIdle(network: Network, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const trace = await readTrace(network.directory)
+    const open = trace.filter((event) => event.kind === "received").length
+    const done = trace.filter(
+      (event) => event.kind === "rejected" || event.kind === "completed" || event.kind === "failed",
+    ).length
+    if (open === done) return
+    if (Date.now() >= deadline) throw new Error(`Flock still busy after ${timeoutMs} ms`)
+    await Bun.sleep(250)
+  }
 }
 
 export async function stopNetwork(network: Network): Promise<void> {

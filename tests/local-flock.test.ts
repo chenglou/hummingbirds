@@ -6,8 +6,10 @@ import { join, resolve } from "path"
 
 import {
   askNetwork,
+  askNetworkAsync,
   readTrace,
   spawnNode,
+  startInbox,
   startNetwork,
   stopNetwork,
   type Network,
@@ -256,6 +258,90 @@ describe("Hummingbirds", () => {
       if (network !== null) await stopNetwork(network)
     }
   }, 15_000)
+
+  test("lets go of the line on Reply-to and relays replies back through the chain", async () => {
+    const trainingQuestion =
+      "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for tideglass trial Nacre-A?"
+    const probeQuestion =
+      "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for saltclock trial Nacre-B?"
+    const directory = join(await makeTemporaryDirectory(), "run")
+    const inbox = startInbox()
+    let network: Network | null = null
+
+    try {
+      network = await startNetwork(
+        resolve("experiments/local-flock/scenario.json"),
+        directory,
+        fakeCodex,
+      )
+      const a = findNode(network, "a")
+      const b = findNode(network, "b")
+      const c = findNode(network, "c")
+
+      // The human hands a an inbox address: a answers 202 and asks b the same way, b asks
+      // c the same way, and the answer travels back as replies, one turn per hop.
+      const training = await askNetworkAsync(network, inbox, trainingQuestion, "q-train", 10_000)
+      expect(training.status).toBe(202)
+      expect(training.replies.map((message) => [message.from, message.body])).toEqual([
+        ["a", `Amber Tern-417.\n\nContributors: c at ${c.url}`],
+      ])
+      const trace = await readTrace(directory, "q-train")
+      expect(
+        trace
+          .filter((event) => event.kind === "received")
+          .map((event) => [
+            event.nodeId,
+            event.callerId,
+            event.replyTo,
+            event.inReplyTo,
+            event.path,
+          ]),
+      ).toEqual([
+        ["a", "human", inbox.url, null, []],
+        ["b", "a", a.url, null, ["a"]],
+        ["c", "b", b.url, null, ["a", "b"]],
+        // A reply carries the path it came down, so b and a would be "cycles" if it were a question.
+        ["b", "c", null, "q-train", ["a", "b", "c"]],
+        ["a", "b", null, "q-train", ["a", "b", "c", "b"]],
+      ])
+      expect(trace.filter((event) => event.kind === "rejected")).toEqual([])
+      // Each bird finished its asking turn before the peer it asked was done, then had
+      // a second turn for the reply: the opposite of the nested sync order c, b, a.
+      expect(
+        trace.filter((event) => event.kind === "completed").map((event) => event.nodeId),
+      ).toEqual(["a", "b", "c", "b", "a"])
+      expect(
+        trace
+          .filter((event) => event.kind === "completed" && event.nodeId === "a")
+          .map((event) => event.answer),
+      ).toEqual(["Asked a peer about q-train; waiting.", `Relayed q-train to ${inbox.url}.`])
+
+      // The relayed reply named c, so a now asks c directly, still without waiting.
+      const probe = await askNetworkAsync(network, inbox, probeQuestion, "q-probe", 10_000)
+      expect(probe.replies.map((message) => message.body)).toEqual([
+        `Violet Shoal-862.\n\nContributors: c at ${c.url}`,
+      ])
+      expect(
+        (await readTrace(directory, "q-probe"))
+          .filter((event) => event.kind === "received")
+          .map((event) => [event.nodeId, event.callerId]),
+      ).toEqual([
+        ["a", "human"],
+        ["c", "a"],
+        ["a", "c"],
+      ])
+
+      // Waiting on the line still works in the same flock.
+      expect(await askNetwork(network, trainingQuestion, "q-sync")).toEqual({
+        answer: `Amber Tern-417.\n\nContributors: c at ${c.url}`,
+        status: 200,
+      })
+      expect(inbox.messages).toHaveLength(2)
+    } finally {
+      inbox.stop()
+      if (network !== null) await stopNetwork(network)
+    }
+  }, 30_000)
 
   test("rejects a broken scenario before starting any bird", async () => {
     const temporaryDirectory = await makeTemporaryDirectory()

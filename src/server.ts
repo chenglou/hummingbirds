@@ -9,17 +9,21 @@ import { basename, join } from "path"
 
 const headers = {
   callerId: "x-hummingbirds-caller-id",
+  inReplyTo: "x-hummingbirds-in-reply-to",
   invocationId: "x-hummingbirds-invocation-id",
   parentInvocationId: "x-hummingbirds-parent-invocation-id",
   path: "x-hummingbirds-path",
+  replyTo: "x-hummingbirds-reply-to",
   requestId: "x-hummingbirds-request-id",
 } as const
 
 type Context = {
   callerId: string
+  inReplyTo: string | null
   invocationId: string
   parentInvocationId: string | null
   path: string[]
+  replyTo: string | null
   requestId: string
 }
 
@@ -73,22 +77,36 @@ async function handleRequest(request: Request): Promise<Response> {
     return new Response("POST a plain-text question to /ask", { status: 404 })
   }
   const path = parsePath(request.headers.get(headers.path))
+  const inReplyTo = request.headers.get(headers.inReplyTo)
   const context: Context = {
     callerId: request.headers.get(headers.callerId) ?? "human",
+    inReplyTo,
     invocationId: request.headers.get(headers.invocationId) ?? crypto.randomUUID(),
     parentInvocationId: request.headers.get(headers.parentInvocationId),
     path: path ?? [],
-    requestId: request.headers.get(headers.requestId) ?? crypto.randomUUID(),
+    replyTo: request.headers.get(headers.replyTo),
+    requestId: request.headers.get(headers.requestId) ?? inReplyTo ?? crypto.randomUUID(),
   }
   if (path === null) return reply(400, `${headers.path} must be a JSON array of node IDs`, context)
   const question = await request.text()
   record(context, "received", { question })
 
-  if (context.path.includes(nodeId)) {
+  // A question that already went through this bird is a cycle. A reply is not a
+  // question, so whatever path it carries is fine.
+  if (inReplyTo === null && context.path.includes(nodeId)) {
     record(context, "rejected")
     return reply(409, `Cycle rejected at ${nodeId}.`, context)
   }
 
+  const turn = runTurn(question, context)
+  if (context.replyTo === null && inReplyTo === null) return turn
+  // Nobody is waiting on the line for a reply, or for a question that asks to be
+  // answered at a Reply-to address: let go of the socket and let the turn run.
+  void turn
+  return reply(202, `Accepted by ${nodeId}.`, context)
+}
+
+async function runTurn(question: string, context: Context): Promise<Response> {
   // One Codex turn at a time: the conversation is a single thread.
   const turn = queue.then(() => ask(question, context))
   queue = turn.catch(() => {})
@@ -141,7 +159,7 @@ async function ask(
       HUMMINGBIRDS_PATH: JSON.stringify([...context.path, nodeId]),
       HUMMINGBIRDS_REQUEST_ID: context.requestId,
     },
-    stdin: new Blob([question]),
+    stdin: new Blob([envelope(question, context)]),
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -175,6 +193,17 @@ async function ask(
   }
   if (answer === null || answer === "") throw new Error("Codex produced no answer")
   return { answer, threadId: startedThreadId }
+}
+
+// What Codex reads: who sent the message, which request it belongs to, where the
+// answer should go, then the message itself.
+function envelope(question: string, context: Context): string {
+  const lines = [
+    `From: ${context.callerId}`,
+    context.inReplyTo === null ? `Request: ${context.requestId}` : `Re: ${context.inReplyTo}`,
+  ]
+  if (context.replyTo !== null) lines.push(`Reply-to: ${context.replyTo}`)
+  return `${lines.join("\n")}\n\n${question}`
 }
 
 function record(context: Context, kind: Event["kind"], extra: Partial<Event> = {}): void {
