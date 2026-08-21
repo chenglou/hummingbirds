@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
+import { tmpdir } from "os"
+import { join, resolve } from "path"
 
 import {
   askNetwork,

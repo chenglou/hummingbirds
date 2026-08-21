@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { mkdir, readFile, writeFile } from "fs/promises"
+import { join } from "path"
 
 const headers = {
   callerId: "x-hummingbirds-caller-id",

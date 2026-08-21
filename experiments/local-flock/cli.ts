@@ -1,4 +1,4 @@
-import { resolve } from "node:path"
+import { resolve } from "path"
 
 import { askNetwork, readTrace, startNetwork, stopNetwork } from "./harness.ts"
 

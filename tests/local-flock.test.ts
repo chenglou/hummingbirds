@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
+import { tmpdir } from "os"
+import { dirname, join, resolve } from "path"
 
 import {
   askNetwork,
