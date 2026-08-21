@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test"
 import {
   scoreSlowPeerTrial,
   type SlowPeerObservation,
-} from "../evals/slow-peer.ts"
+} from "../experiments/slow-peer.ts"
 
 const passing: SlowPeerObservation = {
   answerMatched: true,

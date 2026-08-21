@@ -29,7 +29,7 @@ async function run(arguments_: string[]): Promise<void> {
   if (scenarioPath === undefined || questions.length === 0) throw new Error(usage())
 
   const suffix = `${new Date().toISOString().replaceAll(":", "-")}-${crypto.randomUUID().slice(0, 8)}`
-  const runDirectory = resolve("runs", suffix)
+  const runDirectory = resolve("logs", suffix)
   const network = await startNetwork(scenarioPath, runDirectory)
   try {
     for (const [index, question] of questions.entries()) {

@@ -41,7 +41,7 @@ describe("Hummingbirds", () => {
     let network: RunningNetwork | null = null
 
     try {
-      network = await startNetwork(resolve("example/scenario.json"), runDirectory, environment)
+      network = await startNetwork(resolve("examples/scenario.json"), runDirectory, environment)
 
       const a = findNode(network, "a")
       const b = findNode(network, "b")

@@ -7,14 +7,14 @@ A small prototype of questions moving through a network of AI nodes. Every bird 
 ```sh
 bun install
 codex login
-bun run hummingbirds run example/scenario.json \
+bun run hummingbirds run examples/scenario.json \
   "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for tideglass trial Nacre-A?"
 ```
 
 The raw answer goes to stdout. The run directory and request ID go to stderr. Inspect the complete cross-node trace afterward:
 
 ```sh
-bun run hummingbirds inspect runs/<run> <request-id>
+bun run hummingbirds inspect logs/<run> <request-id>
 ```
 
 Pass several quoted questions to `run` to ask them sequentially on the same live network. Each request launches a Codex CLI process that resumes that bird's exact session, so later questions retain earlier facts and routing experience in context. A bird handles only one model turn at a time; concurrent requests wait in its local queue.
@@ -32,9 +32,21 @@ bun run eval:slow-peer --run-real-model \
 
 This eval makes real model calls and is deliberately separate from `bun test`.
 
-The [archived abstract routing exploration](evals/routing-simulation.md) compared uniform, hard-choice, and success-weighted stochastic routing in a 10,000-node model. Its temporary simulator has been removed from the active tree now that the project has returned to live model-backed experiments.
+The [archived abstract routing exploration](experiments/routing-simulation.md) compared uniform, hard-choice, and success-weighted stochastic routing in a 10,000-node model. Its temporary simulator has been removed from the active tree now that the project has returned to live model-backed experiments.
 
-The [first live stateful-routing exploration](evals/live-routing.md) records the complementary model-backed results: useful broker hierarchy, conflict resolution, contextual self-answering, and clean route shortening across two interleaved topics.
+The [first live stateful-routing exploration](experiments/live-routing.md) records the complementary model-backed results: useful broker hierarchy, conflict resolution, contextual self-answering, and clean route shortening across two interleaved topics.
+
+## Repository layout
+
+```text
+src/          Deployable runtime and shared prompt
+experiments/  Opt-in explorations and their distilled findings
+tests/        Deterministic verification
+examples/     Small input scenarios
+logs/         Ignored diagnostic output created by local runs
+```
+
+`logs/` is disposable and is not part of a bird's memory. A future hosted bird will keep its mutable workspace, thread ID, and Codex session store in a deployment-owned data directory rather than in the source tree.
 
 ## The boundary
 
