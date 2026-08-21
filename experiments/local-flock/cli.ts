@@ -10,10 +10,17 @@ import {
   type Network,
 } from "./harness.ts"
 
+// Flags come right after the command; everything from the first other argument on is
+// positional, so a question may start with "--".
 const [command, ...rest] = process.argv.slice(2)
-const flags = new Set(rest.filter((arg) => arg.startsWith("--")))
-const args = rest.filter((arg) => !arg.startsWith("--"))
+const flagCount = rest.findIndex((arg) => !arg.startsWith("--"))
+const flags = new Set(rest.slice(0, flagCount < 0 ? rest.length : flagCount))
+const args = flagCount < 0 ? [] : rest.slice(flagCount)
 try {
+  const unknown = [...flags].filter((flag) => flag !== "--async" && flag !== "--concurrent")
+  if (unknown.length > 0) throw new Error(`Unknown flag ${unknown[0]}\n${usage()}`)
+  if (flags.has("--concurrent") && !flags.has("--async"))
+    throw new Error(`--concurrent needs --async\n${usage()}`)
   if (command === "run" && args.length >= 2) await run(args[0] ?? "", args.slice(1))
   else if (command === "inspect" && args.length >= 1) await inspect(args[0] ?? "", args[1] ?? null)
   else throw new Error(usage())
@@ -51,11 +58,14 @@ async function runSync(network: Network, questions: string[]): Promise<void> {
 async function runAsync(network: Network, questions: string[], concurrent: boolean): Promise<void> {
   const inbox = startInbox()
   try {
+    const requestIds = new Set<string>()
     const ask = async (question: string): Promise<void> => {
       const requestId = shortId()
+      requestIds.add(requestId)
       console.error(`request: ${requestId}`)
       const result = await askNetworkAsync(network, inbox, question, requestId)
       if (result.status !== 202 || result.replies.length === 0) process.exitCode = 1
+      if (!result.settled) console.error(`flock still busy, gave up waiting on ${requestId}`)
       if (result.replies.length === 0) console.error(`no reply for ${requestId}`)
       for (const message of result.replies) {
         process.stdout.write(`[${requestId}] from ${message.from}:\n${message.body}\n\n`)
@@ -63,6 +73,13 @@ async function runAsync(network: Network, questions: string[], concurrent: boole
     }
     if (concurrent) await Promise.all(questions.map(ask))
     else for (const question of questions) await ask(question)
+    // A bird that slipped on the in-reply-to header still deserves to be heard.
+    for (const message of inbox.messages) {
+      if (message.inReplyTo !== null && requestIds.has(message.inReplyTo)) continue
+      process.stdout.write(
+        `[in reply to ${message.inReplyTo ?? "nothing"}] from ${message.from}:\n${message.body}\n\n`,
+      )
+    }
   } finally {
     inbox.stop()
   }

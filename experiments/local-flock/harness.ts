@@ -137,15 +137,15 @@ export function startInbox(): Inbox {
 }
 
 // Ask without waiting on the line: the entry bird gets the inbox as Reply-to and
-// answers 202 right away. Resolves once no bird has anything left to do, with
-// whatever replies reached the inbox for this request by then.
+// answers 202 right away. Resolves once no bird has anything left to do, or at the
+// timeout (settled: false), with whatever replies reached the inbox for this request.
 export async function askNetworkAsync(
   network: Network,
   inbox: Inbox,
   question: string,
   requestId: string,
   timeoutMs = 600_000,
-): Promise<{ replies: InboxMessage[]; status: number }> {
+): Promise<{ replies: InboxMessage[]; settled: boolean; status: number }> {
   const response = await fetch(findNode(network.nodes, network.entry).url, {
     method: "POST",
     headers: {
@@ -162,24 +162,32 @@ export async function askNetworkAsync(
       replies: [
         { at: Date.now(), body: await response.text(), from: network.entry, inReplyTo: null },
       ],
+      settled: true,
       status,
     }
-  await waitUntilIdle(network, timeoutMs)
-  return { replies: inbox.messages.filter((message) => message.inReplyTo === requestId), status }
+  const settled = await waitUntilIdle(network, timeoutMs)
+  return {
+    replies: inbox.messages.filter((message) => message.inReplyTo === requestId),
+    settled,
+    status,
+  }
 }
 
-// Every request a bird received has been rejected, completed or failed. A bird
-// records a request before answering 202, so nothing can be in flight either.
-export async function waitUntilIdle(network: Network, timeoutMs: number): Promise<void> {
+// True once every request a bird received has been rejected, completed or failed.
+// A bird records a request before answering 202, so nothing can be in flight either,
+// unless a bird ended its turn without waiting for that 202; hence two quiet polls.
+export async function waitUntilIdle(network: Network, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
+  let quiet = 0
   for (;;) {
     const trace = await readTrace(network.directory)
     const open = trace.filter((event) => event.kind === "received").length
     const done = trace.filter(
       (event) => event.kind === "rejected" || event.kind === "completed" || event.kind === "failed",
     ).length
-    if (open === done) return
-    if (Date.now() >= deadline) throw new Error(`Flock still busy after ${timeoutMs} ms`)
+    quiet = open === done ? quiet + 1 : 0
+    if (quiet === 2) return true
+    if (Date.now() >= deadline) return false
     await Bun.sleep(250)
   }
 }

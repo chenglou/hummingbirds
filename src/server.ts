@@ -60,6 +60,8 @@ const workspace = join(process.cwd(), "workspace")
 const threadIdPath = join(process.cwd(), "thread-id")
 const eventsPath = join(process.cwd(), "events.jsonl")
 let queue: Promise<unknown> = Promise.resolve()
+// Requests with a question turn running or queued here.
+const inProgress = new Set<string>()
 let seq = 0
 
 mkdirSync(workspace, { recursive: true })
@@ -103,6 +105,12 @@ async function handleRequest(request: Request): Promise<Response> {
     record(context, "rejected")
     return reply(409, `Cycle rejected at ${nodeId}.`, context)
   }
+  // So is a question for a request this bird is already working on through another
+  // branch: queueing it could leave two branches waiting on each other's turn forever.
+  if (inReplyTo === null && inProgress.has(context.requestId)) {
+    record(context, "rejected")
+    return reply(409, `Already on ${context.requestId} at ${nodeId}.`, context)
+  }
 
   // Someone is waiting on the line only for a plain question. A reply, or a question
   // that asks to be answered at a Reply-to address, gets a 202 right away and its turn
@@ -118,6 +126,10 @@ async function runTurn(question: string, context: Context, waiting: boolean): Pr
   // One Codex turn at a time: the conversation is a single thread.
   const turn = queue.then(() => ask(question, context))
   queue = turn.catch(() => {})
+  if (context.inReplyTo === null) {
+    inProgress.add(context.requestId)
+    void turn.catch(() => {}).finally(() => inProgress.delete(context.requestId))
+  }
   try {
     const { answer, threadId } = await turn
     if (waiting && answer === "") throw new Error("Codex produced no answer")
@@ -126,8 +138,27 @@ async function runTurn(question: string, context: Context, waiting: boolean): Pr
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     record(context, "failed", { error: message, status: 500 })
+    if (context.replyTo !== null) await reportFailure(message, context)
     return reply(500, message, context)
   }
+}
+
+// Nobody is on the line to see the 500, so tell the Reply-to address, the same way
+// the bird itself would have. Best effort: the failure is already on record.
+async function reportFailure(message: string, context: Context): Promise<void> {
+  await fetch(context.replyTo ?? "", {
+    method: "POST",
+    headers: {
+      "content-type": "text/plain; charset=utf-8",
+      [headers.callerId]: nodeId,
+      [headers.inReplyTo]: context.requestId,
+      [headers.invocationId]: crypto.randomUUID(),
+      [headers.parentInvocationId]: context.invocationId,
+      [headers.path]: JSON.stringify(outgoingPath(context)),
+      [headers.requestId]: context.requestId,
+    },
+    body: message,
+  }).catch(() => {})
 }
 
 async function ask(
@@ -165,7 +196,7 @@ async function ask(
       HUMMINGBIRDS_NODE_ADDRESS: address,
       HUMMINGBIRDS_NODE_ID: nodeId,
       HUMMINGBIRDS_PARENT_INVOCATION_ID: context.parentInvocationId ?? "",
-      HUMMINGBIRDS_PATH: JSON.stringify([...context.path, nodeId]),
+      HUMMINGBIRDS_PATH: JSON.stringify(outgoingPath(context)),
       HUMMINGBIRDS_REQUEST_ID: context.requestId,
     },
     stdin: new Blob([envelope(question, context)]),
@@ -202,6 +233,14 @@ async function ask(
   }
   // An empty final message is fine when the bird already POSTed its reply.
   return { answer: answer ?? "", threadId: startedThreadId }
+}
+
+// The path this bird's own calls carry. A reply comes back with the path the question
+// took from here, so pick up where this bird left off instead of appending the return
+// leg: a follow-up to a contributor is not a cycle.
+function outgoingPath(context: Context): string[] {
+  const self = context.inReplyTo === null ? -1 : context.path.indexOf(nodeId)
+  return [...(self < 0 ? context.path : context.path.slice(0, self)), nodeId]
 }
 
 // What Codex reads: who sent the message, which request it belongs to, where the

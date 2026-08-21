@@ -12,6 +12,7 @@ import {
   startInbox,
   startNetwork,
   stopNetwork,
+  waitUntilIdle,
   type Network,
 } from "../experiments/local-flock/harness.ts"
 
@@ -177,6 +178,14 @@ describe("Hummingbirds", () => {
         "cycle",
       )
       expect((await cycle).status).toBe(409)
+      // Another branch of a request that is already running or queued here is rejected
+      // too, so two branches can never wait on each other's turn. Replies still get in.
+      const again = await fetch(solo.url, {
+        method: "POST",
+        headers: { "x-hummingbirds-request-id": "request-3" },
+        body: "question 3 again",
+      })
+      expect([again.status, await again.text()]).toEqual([409, "Already on request-3 at solo."])
 
       expect((await answers).map((result) => result.answer)).toEqual(
         questions.map((question) => `Handled by solo: ${question}`),
@@ -186,8 +195,11 @@ describe("Hummingbirds", () => {
       expect(turns.map((event) => event.kind)).toEqual(
         questions.flatMap(() => ["started", "completed"]),
       )
+      const rejected = new Set(
+        trace.filter((event) => event.kind === "rejected").map((event) => event.invocationId),
+      )
       const admitted = trace
-        .filter((event) => event.kind === "received" && event.requestId.startsWith("request-"))
+        .filter((event) => event.kind === "received" && !rejected.has(event.invocationId))
         .map((event) => event.requestId)
       expect(
         turns.filter((event) => event.kind === "started").map((event) => event.requestId),
@@ -197,6 +209,18 @@ describe("Hummingbirds", () => {
       expect(
         turns.filter((event) => event.kind === "started").map((event) => event.threadId),
       ).toEqual([null, threadId, threadId, threadId, threadId])
+
+      // Once that turn is over, the same request id is welcome again, and a late reply
+      // about it is never refused.
+      expect((await askNetwork(activeNetwork, "question 3 once more", "request-3")).status).toBe(
+        200,
+      )
+      const late = await fetch(solo.url, {
+        method: "POST",
+        headers: { "x-hummingbirds-in-reply-to": "request-3" },
+        body: "a reply about question 3",
+      })
+      expect(late.status).toBe(202)
     } finally {
       if (network !== null) await stopNetwork(network)
     }
@@ -314,9 +338,10 @@ describe("Hummingbirds", () => {
         ["a", "human", inbox.url, null, []],
         ["b", "a", a.url, null, ["a"]],
         ["c", "b", b.url, null, ["a", "b"]],
-        // A reply carries the path it came down, so b and a would be "cycles" if it were a question.
+        // A reply carries the path the question took from the receiver on, so b would be a
+        // "cycle" if it were a question. b's relay then picks up b's own path again.
         ["b", "c", null, "q-train", ["a", "b", "c"]],
-        ["a", "b", null, "q-train", ["a", "b", "c", "b"]],
+        ["a", "b", null, "q-train", ["a", "b"]],
       ])
       expect(trace.filter((event) => event.kind === "rejected")).toEqual([])
       // Each bird finished its asking turn before the peer it asked was done, then had
@@ -361,11 +386,59 @@ describe("Hummingbirds", () => {
         status: 200,
       })
       expect(inbox.messages).toHaveLength(2)
+
+      // Giving up waiting keeps whatever arrived; the flock finishes on its own.
+      const rushed = await askNetworkAsync(network, inbox, probeQuestion, "q-rush", 0)
+      expect([rushed.status, rushed.settled, rushed.replies]).toEqual([202, false, []])
+      expect(await waitUntilIdle(network, 10_000)).toBe(true)
+      expect(inbox.messages.filter((message) => message.inReplyTo === "q-rush")).toHaveLength(1)
+
+      // When a bird's turn fails after it let go of the line, the bird reports the failure
+      // to its Reply-to address, so the asker hears what a waiting caller would have.
+      await writeFile(join(c.directory, "thread-id"), "")
+      const failed = await askNetworkAsync(network, inbox, probeQuestion, "q-fail", 10_000)
+      expect(failed.replies.map((message) => message.from)).toEqual(["a"])
+      expect(failed.replies[0]?.body).toMatch(/\/c\/thread-id is empty$/)
+      const kinds = (nodeId: string): string[] =>
+        failTrace.filter((event) => event.nodeId === nodeId).map((event) => event.kind)
+      const failTrace = await readTrace(directory, "q-fail")
+      expect(kinds("c")).toEqual(["received", "failed"])
+      expect(kinds("a")).toEqual([
+        "received",
+        "started",
+        "completed",
+        "received",
+        "started",
+        "completed",
+      ])
+      expect(failTrace.find((event) => event.kind === "failed")?.replyTo).toBe(a.url)
     } finally {
       inbox.stop()
       if (network !== null) await stopNetwork(network)
     }
   }, 30_000)
+
+  test("rejects unknown flags before starting any bird", async () => {
+    const cli = async (...args: string[]): Promise<[number | null, string]> => {
+      const child = Bun.spawn(
+        [process.execPath, "run", "experiments/local-flock/cli.ts", ...args],
+        {
+          env: { ...process.env, ...fakeCodex },
+          stdout: "ignore",
+          stderr: "pipe",
+        },
+      )
+      const stderr = await new Response(child.stderr).text()
+      return [await child.exited, stderr.split("\n")[0] ?? ""]
+    }
+    const scenario = "experiments/local-flock/scenario.json"
+    expect(await cli("run", "--asycn", scenario, "hello")).toEqual([1, "Unknown flag --asycn"])
+    expect(await cli("run", "--concurrent", scenario, "hello")).toEqual([
+      1,
+      "--concurrent needs --async",
+    ])
+    expect(await cli("run", "--async")).toEqual([1, "Usage:"])
+  })
 
   test("rejects a broken scenario before starting any bird", async () => {
     const temporaryDirectory = await makeTemporaryDirectory()
