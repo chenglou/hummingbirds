@@ -1,0 +1,19 @@
+{
+  "entry": "a",
+  "nodes": [
+    {
+      "id": "a",
+      "peers": ["b", "c"],
+      "seed": "Mood today: cheerful. You just migrated a database with zero downtime."
+    },
+    { "id": "b", "peers": ["d"], "seed": "Mood today: grumpy. The coffee machine broke again." },
+    {
+      "id": "c",
+      "peers": ["d", "e"],
+      "seed": "Mood today: calm. Quiet day, caught up on reading."
+    },
+    { "id": "d", "peers": ["a"], "seed": "Mood today: anxious. There's a deadline on Friday." },
+    { "id": "e", "peers": [], "seed": "Mood today: ecstatic. You adopted a kitten named Pebble." },
+    { "id": "f", "peers": ["c"], "seed": "Mood today: bored. Nobody ever asks you anything." }
+  ]
+}

@@ -31,6 +31,16 @@ Unfinished directions from the exploration. These are options, not commitments; 
 - Punt ownership, abandoned or free-roaming agents, and claiming/reassignment. Later add human workflows for curating and growing private knowledge.
 - Continue assuming benign peers for now. Add defenses against persistent bad answers, spam, fake identities, collusion, and privacy leaks only after the open network exists.
 
+## Async delivery, observed
+
+Findings from the first real-Codex runs with `x-hummingbirds-reply-to` (chain and a 6-bird mood graph), to revisit rather than fix now:
+
+- Given a plain question, birds waited on their peers even when nobody was waiting on them; waiting is simpler and the prompt only says reply-to is there when it helps. Asked to "send what you have as it comes in", the entry bird did switch: it replied with its own part at once, asked both peers with reply-to pointing at itself, ended its turn, and relayed each `Re:` to the human as a separate turn. Three replies to one request, correctly tagged, no harness state. Watch whether birds reach for it unprompted once fan-out gets wider or peers slower.
+- The same "how is everyone feeling" question covered the whole reachable graph in two runs and only one hop in another. The difference was whether the entry bird's rewrite of the question kept the "and who else can you reach" clause. A verbatim forward would have walked every time; the rewrite is where coverage gets lost. Don't special-case this, but it's a reason to keep the "forward verbatim" line.
+- Contributor attribution closes loops fast: after two peers named d and e, the entry bird called d and e directly within the same turn to confirm. Two extra calls, but from then on it knows them first-hand.
+- Before the prompt said which part of a message to forward, a bird forwarded the whole envelope, `Reply-to:` included, so three birds each replied to the human. Model slips with `curl` (a body left in a shell variable, an unset variable) produced empty replies twice; the bird recovered once on its own. Birds and the inbox now answer 400 to an empty body so the next slip is visible to the sender. If slips keep happening, the fix is probably a note in the prompt about `--data-binary @file`, not more harness.
+- A bird's final message after it has posted its reply is a no-op, and birds sometimes say something there anyway ("Reply delivered"). Harmless, but it's wasted tokens in the conversation; see whether it fades.
+
 ## Harness cleanup
 
 - Define abrupt shutdown: `stopNetwork` kills a bird's server but not a Codex turn still in flight; decide whether to drain or terminate descendants.
