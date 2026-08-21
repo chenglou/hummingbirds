@@ -3,8 +3,8 @@
 // just enough of `codex exec --json`: it answers from the "ledger" lines in its
 // AGENTS.md, otherwise asks a peer, and remembers peers it learns about across
 // resumed sessions (stored as .fake-codex/<thread-id>.json in its workspace).
-// A message with a Reply-to address is answered by POSTing there, and peers are
-// then asked the same way; replies that come back are relayed to whoever asked.
+// Like a real bird, it POSTs answers to the message's Reply-to address, asks peers
+// with its own address as Reply-to, and relays their replies to whoever asked.
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises"
 import { join } from "path"
 
@@ -34,44 +34,33 @@ const session: Session =
 const delayMs = Number(Bun.env["HUMMINGBIRDS_FAKE_DELAY_MS"] ?? 0)
 if (delayMs > 0) await Bun.sleep(delayMs)
 
-let answer: string
+// Like the real Codex, the final message goes nowhere; only the POSTs matter.
+let answer = ""
 const inReplyTo = envelope["Re"]
-const replyTo = envelope["Reply-to"]
 if (inReplyTo !== undefined) {
   // A peer answered something we asked on someone's behalf: pass it along.
   const askedBy = session.pending[inReplyTo]
   if (askedBy === undefined) throw new Error(`Unexpected reply to ${inReplyTo}`)
   delete session.pending[inReplyTo]
   learnContributors(session.peers, question)
-  await post(askedBy, question, { "x-hummingbirds-in-reply-to": inReplyTo })
-  answer = "" // Like the real Codex, nothing more to say after POSTing the reply.
+  await post(askedBy, question, inReplyTo)
 } else {
   const requestId = envelope["Request"] ?? ""
+  const replyTo = envelope["Reply-to"]
+  if (replyTo === undefined) throw new Error(`Question ${requestId} without a Reply-to`)
   const privateAnswer = answerFromPrivateKnowledge(agents, question)
-  let found: string | null = null
   if (privateAnswer !== null) {
-    found = `${privateAnswer}\n\nContributors: ${nodeId} at ${nodeAddress}`
+    await post(replyTo, `${privateAnswer}\n\nContributors: ${nodeId} at ${nodeAddress}`, requestId)
   } else if (session.peers.length > 0 && question.includes("Nacre-")) {
     const peer = session.peers.find((candidate) => candidate.id === "c") ?? session.peers[0]
     if (peer === undefined) throw new Error("Expected a peer")
-    if (replyTo === undefined) {
-      found = await post(peer.address, question, {})
-      learnContributors(session.peers, found)
-    } else {
-      session.pending[requestId] = replyTo
-      await post(peer.address, question, { "x-hummingbirds-reply-to": nodeAddress })
-    }
+    session.pending[requestId] = replyTo
+    await post(peer.address, question, null)
+    answer = `Asked ${peer.id} about ${requestId}; waiting.`
   } else {
-    found = `Handled by ${nodeId}: ${question}`
-  }
-  if (found === null) answer = `Asked a peer about ${requestId}; waiting.`
-  else if (replyTo === undefined) answer = found
-  else {
-    await post(replyTo, found, { "x-hummingbirds-in-reply-to": requestId })
-    answer = ""
+    await post(replyTo, `Handled by ${nodeId}: ${question}`, requestId)
   }
 }
-if (Bun.env["HUMMINGBIRDS_FAKE_SILENT"] === "1") answer = ""
 
 await mkdir(".fake-codex", { recursive: true })
 await writeFile(sessionPath(session.threadId), `${JSON.stringify(session, null, 2)}\n`)
@@ -83,8 +72,9 @@ const events = [
 ]
 process.stdout.write(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`)
 
-// POST like the prompt tells a bird to, expecting 200 when waiting and 202 otherwise.
-async function post(address: string, body: string, extra: Record<string, string>): Promise<string> {
+// POST like the prompt tells a bird to: a question when inReplyTo is null, a reply
+// otherwise. Either way the other side only acknowledges.
+async function post(address: string, body: string, inReplyTo: string | null): Promise<void> {
   const response = await fetch(address, {
     method: "POST",
     headers: {
@@ -93,17 +83,16 @@ async function post(address: string, body: string, extra: Record<string, string>
       "x-hummingbirds-invocation-id": crypto.randomUUID(),
       "x-hummingbirds-parent-invocation-id": Bun.env["HUMMINGBIRDS_INVOCATION_ID"] ?? "",
       "x-hummingbirds-path": Bun.env["HUMMINGBIRDS_PATH"] ?? "[]",
+      "x-hummingbirds-reply-to": nodeAddress,
       "x-hummingbirds-request-id": Bun.env["HUMMINGBIRDS_REQUEST_ID"] ?? "",
-      ...extra,
+      ...(inReplyTo === null ? {} : { "x-hummingbirds-in-reply-to": inReplyTo }),
     },
     body,
   })
   const text = await response.text()
-  const expected = Object.keys(extra).length === 0 ? 200 : 202
-  if (response.status !== expected) {
-    throw new Error(`${address} returned ${response.status} instead of ${expected}: ${text}`)
+  if (response.status !== 202) {
+    throw new Error(`${address} returned ${response.status} instead of 202: ${text}`)
   }
-  return text
 }
 
 function sessionPath(threadId: string): string {

@@ -1,26 +1,13 @@
 import { resolve } from "path"
 
-import {
-  askNetwork,
-  askNetworkAsync,
-  readTrace,
-  startInbox,
-  startNetwork,
-  stopNetwork,
-  type Network,
-} from "./harness.ts"
+import { askNetwork, readTrace, startNetwork, stopNetwork } from "./harness.ts"
 
-// Flags come right after the command; everything from the first other argument on is
-// positional, so a question may start with "--".
+// The one flag comes right after the command; everything after it is positional, so
+// a question may start with "--".
 const [command, ...rest] = process.argv.slice(2)
-const flagCount = rest.findIndex((arg) => !arg.startsWith("--"))
-const flags = new Set(rest.slice(0, flagCount < 0 ? rest.length : flagCount))
-const args = flagCount < 0 ? [] : rest.slice(flagCount)
+const concurrent = rest[0] === "--concurrent"
+const args = concurrent ? rest.slice(1) : rest
 try {
-  const unknown = [...flags].filter((flag) => flag !== "--async" && flag !== "--concurrent")
-  if (unknown.length > 0) throw new Error(`Unknown flag ${unknown[0]}\n${usage()}`)
-  if (flags.has("--concurrent") && !flags.has("--async"))
-    throw new Error(`--concurrent needs --async\n${usage()}`)
   if (command === "run" && args.length >= 2) await run(args[0] ?? "", args.slice(1))
   else if (command === "inspect" && args.length >= 1) await inspect(args[0] ?? "", args[1] ?? null)
   else throw new Error(usage())
@@ -29,41 +16,18 @@ try {
   process.exitCode = 1
 }
 
+// Ask one question after another, or with --concurrent fire them all at once and let
+// the flock sort it out. Replies print once the flock goes quiet.
 async function run(scenarioPath: string, questions: string[]): Promise<void> {
   const directory = resolve("logs", new Date().toISOString().replaceAll(":", "-"))
   const network = await startNetwork(scenarioPath, directory)
-  try {
-    if (flags.has("--async")) await runAsync(network, questions, flags.has("--concurrent"))
-    else await runSync(network, questions)
-    console.error(`run: ${directory}`)
-  } finally {
-    await stopNetwork(network)
-  }
-}
-
-// Wait on the line for each answer, one question after another.
-async function runSync(network: Network, questions: string[]): Promise<void> {
-  for (const [index, question] of questions.entries()) {
-    const requestId = shortId()
-    const result = await askNetwork(network, question, requestId)
-    if (index > 0) process.stdout.write("\n\n")
-    process.stdout.write(result.answer)
-    console.error(`request: ${requestId}`)
-    if (result.status !== 200) process.exitCode = 1
-  }
-}
-
-// Hand the birds an inbox address instead; with --concurrent, fire every question
-// at once and let the flock sort it out.
-async function runAsync(network: Network, questions: string[], concurrent: boolean): Promise<void> {
-  const inbox = startInbox()
   try {
     const requestIds = new Set<string>()
     const ask = async (question: string): Promise<void> => {
       const requestId = shortId()
       requestIds.add(requestId)
       console.error(`request: ${requestId}`)
-      const result = await askNetworkAsync(network, inbox, question, requestId)
+      const result = await askNetwork(network, question, requestId)
       if (result.status !== 202 || result.replies.length === 0) process.exitCode = 1
       if (!result.settled) console.error(`flock still busy, gave up waiting on ${requestId}`)
       if (result.replies.length === 0) console.error(`no reply for ${requestId}`)
@@ -74,14 +38,15 @@ async function runAsync(network: Network, questions: string[], concurrent: boole
     if (concurrent) await Promise.all(questions.map(ask))
     else for (const question of questions) await ask(question)
     // A bird that slipped on the in-reply-to header still deserves to be heard.
-    for (const message of inbox.messages) {
+    for (const message of network.inbox.messages) {
       if (message.inReplyTo !== null && requestIds.has(message.inReplyTo)) continue
       process.stdout.write(
         `[in reply to ${message.inReplyTo ?? "nothing"}] from ${message.from}:\n${message.body}\n\n`,
       )
     }
+    console.error(`run: ${directory}`)
   } finally {
-    inbox.stop()
+    await stopNetwork(network)
   }
 }
 
@@ -97,7 +62,7 @@ function shortId(): string {
 function usage(): string {
   return [
     "Usage:",
-    '  bun run experiment:local-flock run [--async [--concurrent]] <scenario.json> "<question>" ["<next-question>" ...]',
+    '  bun run experiment:local-flock run [--concurrent] <scenario.json> "<question>" ["<next-question>" ...]',
     "  bun run experiment:local-flock inspect <run-directory> [request-id]",
   ].join("\n")
 }

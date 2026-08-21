@@ -1,7 +1,6 @@
-// Starts a flock of birds on this machine from a scenario file, asks the entry
-// bird questions (waiting on the line, or through an inbox the birds reply to),
-// and reads the merged event logs back. Each bird lives in <directory>/<id>/
-// exactly as it would on its own machine.
+// Starts a flock of birds on this machine from a scenario file, runs an inbox the
+// birds reply to, asks the entry bird questions, and reads the merged event logs
+// back. Each bird lives in <directory>/<id>/ exactly as it would on its own machine.
 import { mkdir, readdir, readFile, writeFile } from "fs/promises"
 import { join, resolve } from "path"
 
@@ -19,12 +18,6 @@ export type Node = {
   url: string
 }
 
-export type Network = {
-  directory: string
-  entry: string
-  nodes: Node[]
-}
-
 // A message a bird POSTed to the human's inbox.
 export type InboxMessage = {
   at: number
@@ -37,6 +30,13 @@ export type Inbox = {
   messages: InboxMessage[]
   stop: () => void
   url: string
+}
+
+export type Network = {
+  directory: string
+  entry: string
+  inbox: Inbox
+  nodes: Node[]
 }
 
 const serverPath = resolve(import.meta.dir, "../../src/server.ts")
@@ -68,7 +68,7 @@ export async function startNetwork(
         .replaceAll("[seed]", seed.seed === "" ? "(none)" : seed.seed),
     )
   }
-  return { directory: resolve(directory), entry: scenario.entry, nodes }
+  return { directory: resolve(directory), entry: scenario.entry, inbox: startInbox(), nodes }
 }
 
 export async function spawnNode(
@@ -94,25 +94,8 @@ export async function spawnNode(
   }
 }
 
-export async function askNetwork(
-  network: Network,
-  question: string,
-  requestId: string = crypto.randomUUID(),
-): Promise<{ answer: string; status: number }> {
-  const response = await fetch(findNode(network.nodes, network.entry).url, {
-    method: "POST",
-    headers: {
-      "content-type": "text/plain; charset=utf-8",
-      "x-hummingbirds-caller-id": "human",
-      "x-hummingbirds-request-id": requestId,
-    },
-    body: question,
-  })
-  return { answer: await response.text(), status: response.status }
-}
-
 // The human as a node: an address birds can POST replies to.
-export function startInbox(): Inbox {
+function startInbox(): Inbox {
   const messages: InboxMessage[] = []
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -136,14 +119,13 @@ export function startInbox(): Inbox {
   }
 }
 
-// Ask without waiting on the line: the entry bird gets the inbox as Reply-to and
-// answers 202 right away. Resolves once no bird has anything left to do, or at the
-// timeout (settled: false), with whatever replies reached the inbox for this request.
-export async function askNetworkAsync(
+// The entry bird gets the inbox as Reply-to and answers 202 right away. Resolves once
+// no bird has anything left to do, or at the timeout (settled: false), with whatever
+// replies reached the inbox for this request.
+export async function askNetwork(
   network: Network,
-  inbox: Inbox,
   question: string,
-  requestId: string,
+  requestId: string = crypto.randomUUID(),
   timeoutMs = 600_000,
 ): Promise<{ replies: InboxMessage[]; settled: boolean; status: number }> {
   const response = await fetch(findNode(network.nodes, network.entry).url, {
@@ -151,7 +133,7 @@ export async function askNetworkAsync(
     headers: {
       "content-type": "text/plain; charset=utf-8",
       "x-hummingbirds-caller-id": "human",
-      "x-hummingbirds-reply-to": inbox.url,
+      "x-hummingbirds-reply-to": network.inbox.url,
       "x-hummingbirds-request-id": requestId,
     },
     body: question,
@@ -167,7 +149,7 @@ export async function askNetworkAsync(
     }
   const settled = await waitUntilIdle(network, timeoutMs)
   return {
-    replies: inbox.messages.filter((message) => message.inReplyTo === requestId),
+    replies: network.inbox.messages.filter((message) => message.inReplyTo === requestId),
     settled,
     status,
   }
@@ -193,6 +175,7 @@ export async function waitUntilIdle(network: Network, timeoutMs: number): Promis
 }
 
 export async function stopNetwork(network: Network): Promise<void> {
+  network.inbox.stop()
   for (const node of network.nodes) node.process.kill()
   await Promise.all(network.nodes.map((node) => node.process.exited))
 }

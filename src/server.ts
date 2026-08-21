@@ -1,8 +1,10 @@
-// One bird: an HTTP server that forwards each question to a persistent Codex
+// One bird: an HTTP server that hands each message to a persistent Codex
 // conversation. Run it inside the bird's directory, which holds:
-//   thread-id     the Codex conversation to resume (created on the first question)
-//   events.jsonl  a log of every request, for inspection only
+//   thread-id     the Codex conversation to resume (created on the first message)
+//   events.jsonl  a log of every message, for inspection only
 //   workspace/    Codex's working directory, where AGENTS.md tells the bird who it is
+// Nobody waits on the line: a message is acknowledged at once, the turn runs in its
+// own time, and the bird POSTs whatever it has to say to the message's Reply-to address.
 import { appendFileSync, mkdirSync } from "fs"
 import { rename } from "fs/promises"
 import { basename, join } from "path"
@@ -35,7 +37,6 @@ export type Event = Context & {
   question?: string
   threadId?: string | null
   codexPid?: number
-  status?: number
   answer?: string
   error?: string
 }
@@ -60,8 +61,6 @@ const workspace = join(process.cwd(), "workspace")
 const threadIdPath = join(process.cwd(), "thread-id")
 const eventsPath = join(process.cwd(), "events.jsonl")
 let queue: Promise<unknown> = Promise.resolve()
-// Requests with a question turn running or queued here.
-const inProgress = new Set<string>()
 let seq = 0
 
 mkdirSync(workspace, { recursive: true })
@@ -76,7 +75,7 @@ console.log(JSON.stringify({ id: nodeId, pid: process.pid, url: address }))
 
 async function handleRequest(request: Request): Promise<Response> {
   if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
-    return new Response("POST a plain-text question to /ask", { status: 404 })
+    return new Response("POST a plain-text message to /ask", { status: 404 })
   }
   const path = parsePath(request.headers.get(headers.path))
   const inReplyTo = request.headers.get(headers.inReplyTo)
@@ -93,58 +92,41 @@ async function handleRequest(request: Request): Promise<Response> {
   const question = await request.text()
   record(context, "received", { question })
 
-  // Usually a reply whose body never made it into curl; better to hear about it now.
-  if (question.trim() === "") {
-    record(context, "rejected", { error: "Empty message" })
-    return reply(400, "Empty message.", context)
+  // Slips are better heard about now than discovered in the log: a body that never
+  // made it into curl, or a question with nowhere to send the answer.
+  if (question.trim() === "") return reject(400, "Empty message.", context)
+  if (inReplyTo === null && context.replyTo === null) {
+    return reject(400, `Missing ${headers.replyTo}.`, context)
   }
-
-  // A question that already went through this bird is a cycle. A reply is not a
-  // question, so whatever path it carries is fine.
+  // A question that already went through this bird is a cycle; nothing else would
+  // stop it going round forever. A reply is not a question, so its path is fine.
   if (inReplyTo === null && context.path.includes(nodeId)) {
-    record(context, "rejected")
-    return reply(409, `Cycle rejected at ${nodeId}.`, context)
-  }
-  // So is a question for a request this bird is already working on through another
-  // branch: queueing it could leave two branches waiting on each other's turn forever.
-  if (inReplyTo === null && inProgress.has(context.requestId)) {
-    record(context, "rejected")
-    return reply(409, `Already on ${context.requestId} at ${nodeId}.`, context)
+    return reject(409, `Cycle rejected at ${nodeId}.`, context)
   }
 
-  // Someone is waiting on the line only for a plain question. A reply, or a question
-  // that asks to be answered at a Reply-to address, gets a 202 right away and its turn
-  // runs on its own; the bird POSTs whatever it has to say.
-  const waiting = context.replyTo === null && inReplyTo === null
-  const turn = runTurn(question, context, waiting)
-  if (waiting) return turn
-  void turn
+  void runTurn(question, context)
   return reply(202, `Accepted by ${nodeId}.`, context)
 }
 
-async function runTurn(question: string, context: Context, waiting: boolean): Promise<Response> {
+async function runTurn(question: string, context: Context): Promise<void> {
   // One Codex turn at a time: the conversation is a single thread.
   const turn = queue.then(() => ask(question, context))
   queue = turn.catch(() => {})
-  if (context.inReplyTo === null) {
-    inProgress.add(context.requestId)
-    void turn.catch(() => {}).finally(() => inProgress.delete(context.requestId))
-  }
   try {
     const { answer, threadId } = await turn
-    if (waiting && answer === "") throw new Error("Codex produced no answer")
-    record(context, "completed", { answer, status: 200, threadId })
-    return reply(200, answer, context)
+    record(context, "completed", { answer, threadId })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    record(context, "failed", { error: message, status: 500 })
-    if (context.replyTo !== null) await reportFailure(message, context)
-    return reply(500, message, context)
+    // Nobody saw the turn fail, so tell the asker the same way the bird itself would
+    // have, then put it on record. A failed reply turn owes nobody anything, and not
+    // reporting it is what keeps two failing birds from bouncing reports forever.
+    if (context.inReplyTo === null && context.replyTo !== null) {
+      await reportFailure(message, context)
+    }
+    record(context, "failed", { error: message })
   }
 }
 
-// Nobody is on the line to see the 500, so tell the Reply-to address, the same way
-// the bird itself would have. Best effort: the failure is already on record.
 async function reportFailure(message: string, context: Context): Promise<void> {
   await fetch(context.replyTo ?? "", {
     method: "POST",
@@ -155,6 +137,7 @@ async function reportFailure(message: string, context: Context): Promise<void> {
       [headers.invocationId]: crypto.randomUUID(),
       [headers.parentInvocationId]: context.invocationId,
       [headers.path]: JSON.stringify(outgoingPath(context)),
+      [headers.replyTo]: address,
       [headers.requestId]: context.requestId,
     },
     body: message,
@@ -231,7 +214,7 @@ async function ask(
   if (threadId !== null && startedThreadId !== threadId) {
     throw new Error(`Codex resumed thread ${startedThreadId} instead of ${threadId}`)
   }
-  // An empty final message is fine when the bird already POSTed its reply.
+  // What Codex says at the end of the turn goes nowhere; it is kept for inspection.
   return { answer: answer ?? "", threadId: startedThreadId }
 }
 
@@ -257,6 +240,11 @@ function envelope(question: string, context: Context): string {
 function record(context: Context, kind: Event["kind"], extra: Partial<Event> = {}): void {
   const event: Event = { ...context, ...extra, at: Date.now(), kind, nodeId, seq: seq++ }
   appendFileSync(eventsPath, `${JSON.stringify(event)}\n`)
+}
+
+function reject(status: number, body: string, context: Context): Response {
+  record(context, "rejected", { error: body })
+  return reply(status, body, context)
 }
 
 function reply(status: number, body: string, context: Context): Response {
