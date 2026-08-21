@@ -3,7 +3,7 @@
 // just enough of `codex exec --json`: it answers from the "ledger" lines in its
 // AGENTS.md, otherwise asks a peer, and remembers peers it learns about across
 // resumed sessions (stored as .fake-codex/<thread-id>.json in its workspace).
-import { mkdir, readFile, writeFile } from "fs/promises"
+import { appendFile, mkdir, readFile, writeFile } from "fs/promises"
 import { join } from "path"
 
 type Peer = { address: string; id: string }
@@ -51,6 +51,7 @@ if (privateAnswer !== null) {
 
 await mkdir(".fake-codex", { recursive: true })
 await writeFile(sessionPath(session.threadId), `${JSON.stringify(session, null, 2)}\n`)
+await appendFile(join(".fake-codex", "argv.jsonl"), `${JSON.stringify(process.argv.slice(2))}\n`)
 const events = [
   { thread_id: session.threadId, type: "thread.started" },
   { item: { id: "item_0", text: answer, type: "agent_message" }, type: "item.completed" },

@@ -4,6 +4,7 @@
 //   events.jsonl  a log of every request, for inspection only
 //   workspace/    Codex's working directory, where AGENTS.md tells the bird who it is
 import { appendFileSync, mkdirSync } from "fs"
+import { rename } from "fs/promises"
 import { basename, join } from "path"
 
 const headers = {
@@ -43,10 +44,11 @@ type CodexEvent = {
 
 const nodeId = basename(process.cwd())
 const codex = Bun.env["HUMMINGBIRDS_CODEX"] ?? "codex"
-// Extra flags for the Codex turn, for example `-m model` or `-c key=value`. They go
-// after the subcommand because `codex` silently drops root-level `-c` overrides, so
-// they must be valid for both `codex exec` and `codex exec resume` (`-s`, `-C` and
-// the other exec-only flags are not).
+// Extra flags for the Codex turn, for example `-m model` or `-c key=value`, split on
+// whitespace (no shell quoting: a literal space always splits). They go after the
+// subcommand because `codex` silently drops root-level `-c` overrides, so they must be
+// valid for both `codex exec` and `codex exec resume` (`-s`, `-C` and the other
+// exec-only flags are not).
 const codexArgs = (Bun.env["HUMMINGBIRDS_CODEX_ARGS"] ?? "")
   .split(/\s+/)
   .filter((arg) => arg !== "")
@@ -106,8 +108,9 @@ async function ask(
   context: Context,
 ): Promise<{ answer: string; threadId: string }> {
   const threadIdFile = Bun.file(threadIdPath)
-  const savedThreadId = (await threadIdFile.exists()) ? (await threadIdFile.text()).trim() : ""
-  const threadId = savedThreadId === "" ? null : savedThreadId
+  const threadId = (await threadIdFile.exists()) ? (await threadIdFile.text()).trim() : null
+  // The conversation is the bird's only memory, so never quietly start a new one.
+  if (threadId === "") throw new Error(`${threadIdPath} is empty`)
   const common = [
     "--ignore-user-config",
     "--ignore-rules",
@@ -159,7 +162,10 @@ async function ask(
       answer = event.item.text ?? null
     }
   }
-  if (threadId === null && startedThreadId !== null) await Bun.write(threadIdPath, startedThreadId)
+  if (threadId === null && startedThreadId !== null) {
+    await Bun.write(`${threadIdPath}.tmp`, startedThreadId)
+    await rename(`${threadIdPath}.tmp`, threadIdPath)
+  }
 
   if (exitCode !== 0)
     throw new Error(`Codex exited with ${exitCode}: ${stderr.trim().slice(-2000)}`)

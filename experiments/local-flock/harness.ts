@@ -32,6 +32,7 @@ export async function startNetwork(
   env: Record<string, string> = {},
 ): Promise<Network> {
   const scenario = JSON.parse(await readFile(scenarioPath, "utf8")) as Scenario
+  validate(scenario)
   const prompt = await readFile(promptPath, "utf8")
   const nodes = await Promise.all(
     scenario.nodes.map((seed) => spawnNode(join(directory, seed.id), env)),
@@ -119,6 +120,22 @@ export async function readTrace(
     (left, right) =>
       left.at - right.at || left.nodeId.localeCompare(right.nodeId) || left.seq - right.seq,
   )
+}
+
+// Check the scenario before any bird starts, so a typo can't leave servers running.
+function validate(scenario: Scenario): void {
+  const ids = new Set<string>()
+  for (const node of scenario.nodes) {
+    if (!/^[A-Za-z0-9_-]+$/.test(node.id)) throw new Error(`Invalid node ID: ${node.id}`)
+    if (ids.has(node.id)) throw new Error(`Duplicate node ID: ${node.id}`)
+    ids.add(node.id)
+  }
+  for (const node of scenario.nodes) {
+    for (const peer of node.peers) {
+      if (!ids.has(peer)) throw new Error(`Unknown peer ${peer} of node ${node.id}`)
+    }
+  }
+  if (!ids.has(scenario.entry)) throw new Error(`Unknown entry node: ${scenario.entry}`)
 }
 
 function findNode(nodes: Node[], id: string): Node {

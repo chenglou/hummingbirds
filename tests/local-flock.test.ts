@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
+import { existsSync } from "fs"
 import { mkdtemp, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
@@ -198,6 +199,85 @@ describe("Hummingbirds", () => {
       if (network !== null) await stopNetwork(network)
     }
   }, 15_000)
+
+  test("passes extra Codex flags after the subcommand and refuses an empty thread-id file", async () => {
+    const temporaryDirectory = await makeTemporaryDirectory()
+    const scenarioPath = join(temporaryDirectory, "scenario.json")
+    const directory = join(temporaryDirectory, "run")
+    await writeFile(
+      scenarioPath,
+      JSON.stringify({ entry: "solo", nodes: [{ id: "solo", peers: [], seed: "" }] }),
+    )
+    let network: Network | null = null
+
+    try {
+      network = await startNetwork(scenarioPath, directory, {
+        ...fakeCodex,
+        HUMMINGBIRDS_CODEX_ARGS: " -m gpt-test  -c model_auto_compact_token_limit=20000 ",
+      })
+      const solo = findNode(network, "solo")
+      expect((await askNetwork(network, "first")).status).toBe(200)
+      expect((await askNetwork(network, "second")).status).toBe(200)
+      const threadId = await readFile(join(solo.directory, "thread-id"), "utf8")
+      const common = [
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        'sandbox_mode="workspace-write"',
+        "-c",
+        "sandbox_workspace_write.network_access=true",
+        "-c",
+        "project_root_markers=[]",
+        "--json",
+      ]
+      const extra = ["-m", "gpt-test", "-c", "model_auto_compact_token_limit=20000"]
+      const argvPath = join(solo.directory, "workspace", ".fake-codex", "argv.jsonl")
+      const readArgv = async (): Promise<string[][]> =>
+        (await readFile(argvPath, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as string[])
+      expect(await readArgv()).toEqual([
+        ["--search", "exec", ...common, ...extra, "-"],
+        ["--search", "exec", "resume", ...common, ...extra, threadId, "-"],
+      ])
+
+      // An empty thread-id file is corrupt state, not a fresh bird: fail, don't fork.
+      await writeFile(join(solo.directory, "thread-id"), "")
+      const third = await askNetwork(network, "third")
+      expect(third.status).toBe(500)
+      expect(third.answer).toContain("thread-id is empty")
+      expect(await readFile(join(solo.directory, "thread-id"), "utf8")).toBe("")
+      expect(await readArgv()).toHaveLength(2)
+    } finally {
+      if (network !== null) await stopNetwork(network)
+    }
+  }, 15_000)
+
+  test("rejects a broken scenario before starting any bird", async () => {
+    const temporaryDirectory = await makeTemporaryDirectory()
+    const scenarioPath = join(temporaryDirectory, "scenario.json")
+    const directory = join(temporaryDirectory, "run")
+    await writeFile(
+      scenarioPath,
+      JSON.stringify({
+        entry: "a",
+        nodes: [
+          { id: "a", peers: ["b"], seed: "" },
+          { id: "a", peers: [], seed: "" },
+        ],
+      }),
+    )
+    const started = await startNetwork(scenarioPath, directory, fakeCodex).then(
+      () => "started",
+      (error: unknown) => String(error),
+    )
+    expect(started).toBe("Error: Duplicate node ID: a")
+    expect(existsSync(directory)).toBe(false)
+  })
 })
 
 async function makeTemporaryDirectory(): Promise<string> {
