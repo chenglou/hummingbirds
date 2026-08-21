@@ -1,7 +1,15 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 
-import { headers, requireRecord, requireString } from "../src/protocol.ts"
+const headers = {
+  callerId: "x-hummingbirds-caller-id",
+  invocationId: "x-hummingbirds-invocation-id",
+  parentInvocationId: "x-hummingbirds-parent-invocation-id",
+  path: "x-hummingbirds-path",
+  requestId: "x-hummingbirds-request-id",
+} as const
+
+type JsonObject = Record<string, unknown>
 
 type Peer = {
   address: string
@@ -170,5 +178,18 @@ function readDelay(): number {
 function requireEnvironment(name: string): string {
   const value = Bun.env[name]
   if (value === undefined || value.length === 0) throw new Error(`${name} is required`)
+  return value
+}
+
+function requireRecord(value: unknown, label: string): JsonObject {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`)
+  }
+  return value as JsonObject
+}
+
+function requireString(record: JsonObject, key: string): string {
+  const value = record[key]
+  if (typeof value !== "string") throw new Error(`${key} must be a string`)
   return value
 }

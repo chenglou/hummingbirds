@@ -1,14 +1,17 @@
-import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 
-import {
-  headers,
-  requireRecord,
-  requireString,
-  type TraceEvent,
-} from "./protocol.ts"
-import { parseReadyMessage, parseTraceEvent } from "./trace.ts"
+import { parseReadyMessage, parseTraceEvent, type TraceEvent } from "./trace.ts"
+
+const headers = {
+  callerId: "x-hummingbirds-caller-id",
+  invocationId: "x-hummingbirds-invocation-id",
+  path: "x-hummingbirds-path",
+  requestId: "x-hummingbirds-request-id",
+} as const
+
+type JsonObject = Record<string, unknown>
 
 type Scenario = {
   entry: string
@@ -41,7 +44,7 @@ type AskResult = {
   status: number
 }
 
-const sourceDirectory = import.meta.dir
+const sourceDirectory = resolve(import.meta.dir, "../../src")
 const eventLogPathEnvironment = "HUMMINGBIRDS_EVENT_LOG_PATH"
 const threadIdPathEnvironment = "HUMMINGBIRDS_THREAD_ID_PATH"
 
@@ -58,7 +61,7 @@ export async function startNetwork(
 ): Promise<RunningNetwork> {
   const absoluteRunDirectory = resolve(runDirectory)
   const scenario = await loadScenario(resolve(scenarioPath))
-  const prompt = await readFile(join(sourceDirectory, "prompt.md"), "utf8")
+  const prompt = await readFile(join(sourceDirectory, "prompt_template.md"), "utf8")
 
   await mkdir(dirname(absoluteRunDirectory), { recursive: true })
   await mkdir(absoluteRunDirectory)
@@ -73,12 +76,7 @@ export async function startNetwork(
       runtimes.map(async (runtime) => {
         const archiveDirectory = join(absoluteRunDirectory, runtime.id)
         await Promise.all([mkdir(runtime.directory), mkdir(archiveDirectory)])
-        await Promise.all([
-          copyFile(join(sourceDirectory, "agent.ts"), join(runtime.directory, "agent.ts")),
-          copyFile(join(sourceDirectory, "protocol.ts"), join(runtime.directory, "protocol.ts")),
-          copyFile(join(sourceDirectory, "server.ts"), join(runtime.directory, "server.ts")),
-          writeFile(join(archiveDirectory, "events.jsonl"), ""),
-        ])
+        await writeFile(join(archiveDirectory, "events.jsonl"), "")
       }),
     )
   } catch (error) {
@@ -168,6 +166,7 @@ export async function stopNetwork(network: RunningNetwork): Promise<void> {
   await Promise.all(
     network.nodes.map((node) => {
       const reservedFiles = new Set([
+        join(node.directory, "codex-traces"),
         join(node.directory, "events.jsonl"),
         join(node.directory, "thread-id"),
       ])
@@ -214,7 +213,7 @@ function spawnNode(
   environment: Record<string, string>,
 ): SpawnedNode {
   const child = Bun.spawn({
-    cmd: [process.execPath, "run", "server.ts"],
+    cmd: [process.execPath, "run", join(sourceDirectory, "server.ts")],
     cwd: runtime.directory,
     env: {
       ...process.env,
@@ -363,4 +362,17 @@ function parseManifestNodeIds(value: unknown): string[] {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function requireRecord(value: unknown, label: string): JsonObject {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`)
+  }
+  return value as JsonObject
+}
+
+function requireString(record: JsonObject, key: string): string {
+  const value = record[key]
+  if (typeof value !== "string") throw new Error(`${key} must be a string`)
+  return value
 }

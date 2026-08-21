@@ -55,7 +55,7 @@ async function inspect(arguments_: string[]): Promise<void> {
 function usage(): string {
   return [
     "Usage:",
-    '  bun run hummingbirds run <scenario.json> "<question>" ["<next-question>" ...]',
-    "  bun run hummingbirds inspect <run-directory> [request-id]",
+    '  bun run experiment:local-flock run <scenario.json> "<question>" ["<next-question>" ...]',
+    "  bun run experiment:local-flock inspect <run-directory> [request-id]",
   ].join("\n")
 }

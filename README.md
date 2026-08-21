@@ -1,71 +1,80 @@
 # Hummingbirds
 
-A small prototype of questions moving through a network of AI nodes. Every bird is an independent Bun process with its own port and one continuing Codex session. The model—not the harness—chooses whom to ask, what to remember, and how its routing changes.
+A small prototype of stateful AI nodes communicating over one low-level boundary: plain-text `POST /ask` in, plain-text response out. Each bird owns one continuing Codex session. The model—not a JavaScript router—decides whom to ask, what to retain, and how its local view of the flock changes.
 
-## Run it
+## Core
+
+The deployable runtime is intentionally small in shape:
+
+```text
+src/
+  server.ts            One bird's Bun server, queue, Codex session, and persistence
+  prompt_template.md   Rendered into the bird workspace as AGENTS.md
+```
+
+`server.ts` is one process with one lifetime. It accepts `/ask`, rejects request-path cycles before queueing, serializes valid turns, starts or resumes Codex CLI, and atomically saves the resulting thread ID. These responsibilities used to be split among `server.ts`, `agent.ts`, and `protocol.ts`; there was only one caller and no interchangeable agent or protocol implementation, so the split added names and imports without representing independent components. A focused Codex adapter can be extracted later if a second model backend creates a real boundary.
+
+The bird's mutable data is separate from the app source:
+
+```text
+bird/
+  workspace/
+    AGENTS.md
+  thread-id
+```
+
+The actual transcript and compaction state remain in Codex's session store. Resuming therefore requires the same workspace, thread-ID path, and Codex home/profile. The bird has no routing or knowledge file; later facts, peer judgments, and discovered routes live in its conversation.
+
+Diagnostics are optional. Set `HUMMINGBIRDS_EVENT_LOG_PATH` to append process and request events somewhere outside the model workspace. Also set `HUMMINGBIRDS_CODEX_JSON_TRACE=1` to retain raw Codex JSONL beside that event log. The repository's `logs/` directory is ignored and used only by experiments.
+
+The current server binds to loopback and expects its workspace, rendered prompt, thread-ID path, and Codex profile to be provisioned by its caller. A stable hosted launcher, advertised public address, and authentication remain future deployment work.
+
+## Local flock experiment
+
+The multi-process local harness is an experiment rather than part of the deployed bird:
 
 ```sh
 bun install
 codex login
-bun run hummingbirds run examples/scenario.json \
+bun run experiment:local-flock run experiments/local-flock/scenario.json \
   "In the fictional pelagic-lichen chronometry ledger, what exact harbor phrase is recorded for tideglass trial Nacre-A?"
 ```
 
-The raw answer goes to stdout. The run directory and request ID go to stderr. Inspect the complete cross-node trace afterward:
+The answer goes to stdout. The ignored run directory and request ID go to stderr. Inspect the cross-node event trace afterward:
 
 ```sh
-bun run hummingbirds inspect logs/<run> <request-id>
+bun run experiment:local-flock inspect logs/<run> <request-id>
 ```
 
-Pass several quoted questions to `run` to ask them sequentially on the same live network. Each request launches a Codex CLI process that resumes that bird's exact session, so later questions retain earlier facts and routing experience in context. A bird handles only one model turn at a time; concurrent requests wait in its local queue.
+Pass several quoted questions to `run` to ask them sequentially on the same live flock. Every node gets an unrelated temporary workspace containing a rendered `AGENTS.md`; all nodes execute the same immutable `src/server.ts` from the repository. The harness starts ephemeral ports, supplies initial peer addresses and private seed text, and writes diagnostics under one ignored run directory. On orderly shutdown it archives remaining workspace artifacts and removes the temporary roots.
 
-Codex CLI authentication is reused; no API key is copied into a bird. Override the model, reasoning effort, or diagnostic reasoning summary with `HUMMINGBIRDS_CODEX_MODEL`, `HUMMINGBIRDS_CODEX_REASONING_EFFORT`, or `HUMMINGBIRDS_CODEX_REASONING_SUMMARY`.
+For model-level debugging, override `HUMMINGBIRDS_CODEX_MODEL`, `HUMMINGBIRDS_CODEX_REASONING_EFFORT`, or `HUMMINGBIRDS_CODEX_REASONING_SUMMARY`.
 
-For agent-level debugging, set `HUMMINGBIRDS_CODEX_JSON_TRACE=1`. Each node then retains Codex's raw JSONL events under `codex-traces/`; `/ask` still returns only the final plain-text answer.
-
-Prompt changes have an opt-in live slow-peer eval. It gives one Luna bird an in-memory peer with a fresh random answer, delays that answer past Codex's tool yield, and rejects duplicate or abandoned calls:
+Prompt changes have an opt-in slow-peer experiment. It gives one Luna bird an in-memory peer with a fresh random answer, delays that answer past Codex's tool yield, and rejects duplicate or abandoned calls:
 
 ```sh
-bun run eval:slow-peer --run-real-model \
+bun run experiment:slow-peer --run-real-model \
   --codex /Applications/ChatGPT.app/Contents/Resources/codex
 ```
 
-This eval makes real model calls and is deliberately separate from `bun test`.
-
-The [archived abstract routing exploration](experiments/routing-simulation.md) compared uniform, hard-choice, and success-weighted stochastic routing in a 10,000-node model. Its temporary simulator has been removed from the active tree now that the project has returned to live model-backed experiments.
-
-The [first live stateful-routing exploration](experiments/live-routing.md) records the complementary model-backed results: useful broker hierarchy, conflict resolution, contextual self-answering, and clean route shortening across two interleaved topics.
+This makes real model calls and is deliberately separate from `bun test`.
 
 ## Repository layout
 
 ```text
-src/          Deployable runtime and shared prompt
-experiments/  Opt-in explorations and their distilled findings
-tests/        Deterministic verification
-examples/     Small input scenarios
-logs/         Ignored diagnostic output created by local runs
+src/                          Single-bird runtime and prompt template
+experiments/local-flock/      Temporary multi-bird harness, CLI, trace reader, scenario
+experiments/slow-peer.ts      Opt-in live prompt regression experiment
+experiments/*.md              Distilled findings and future ideas
+tests/                        Deterministic runtime and harness verification
+logs/                         Ignored, disposable diagnostic output
 ```
 
-`logs/` is disposable and is not part of a bird's memory. A future hosted bird will keep its mutable workspace, thread ID, and Codex session store in a deployment-owned data directory rather than in the source tree.
+The [abstract routing exploration](experiments/routing-simulation.md) records results from the removed 10,000-node simulator. The [live routing exploration](experiments/live-routing.md) records broker hierarchy, conflict resolution, contextual self-answering, and route shortening observed with real stateful models. The archived implementation that preceded the current cleanup is available at Git tag `exploration-v1`.
 
-## The boundary
+## Network behavior
 
-Each live node workspace contains:
-
-```text
-server.ts
-agent.ts
-protocol.ts
-AGENTS.md
-```
-
-`server.ts` exposes only `POST /ask`: plain text in, plain text out. `agent.ts` starts or resumes the bird's full Codex session and records process-level events in the run archive. The rendered `AGENTS.md` contains the shared prompt, that bird's ID and address, its initial peers, and its initial private knowledge.
-
-There are no mutable routing or knowledge files. Later facts, peer evaluations, and discovered routes remain in the Codex conversation. The Bun server saves the exact Codex thread ID outside the model workspace. A manually relaunched server can resume that conversation when it keeps the same workspace, Codex session store, and thread-ID state path.
-
-The harness gives each bird a separate temporary workspace, renders the initial context, starts processes on ephemeral ports, sends root questions, streams append-only events into one run archive, and stores the saved thread ID alongside them. On orderly shutdown, it archives the remaining workspace files there too. This prevents ordinary parent-directory inspection from turning the local simulation into a global directory; it is not an adversarial filesystem boundary. `network.json` and `events.jsonl` exist for inspection; neither is consulted when an agent routes. Codex is only the reference implementation behind `/ask`; another implementation can expose the same plain-text boundary.
-
-The scenario supplies initial peer IDs and private seed text. For example, `a → b → c` lets `a` begin with one unknown contact while the invented answer starts only in `c`'s context:
+The local scenario supplies initial peer IDs and private seed text. For example, `a → b → c` lets `a` begin with one contact while the invented answer starts only in `c`'s context:
 
 ```json
 {
@@ -78,6 +87,4 @@ The scenario supplies initial peer IDs and private seed text. For example, `a �
 }
 ```
 
-There are no router/end-node roles, scores, answer schemas, caches, retries, or hop limits. Cycles are rejected when callers preserve the request path. Valid requests to one bird are processed serially.
-
-The archived exploration that led here is available at Git tag `exploration-v1`.
+There are no router/end-node roles, scores, answer schemas, caches, retries, or hop limits. Cycles are rejected when callers preserve the request path. Valid requests to one bird are processed serially. Codex CLI is only the current implementation behind `/ask`; another bird may implement the same plain-text boundary differently.

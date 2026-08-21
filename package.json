@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "eval:slow-peer": "bun run experiments/slow-peer.ts",
-    "hummingbirds": "bun run src/cli.ts",
+    "experiment:local-flock": "bun run experiments/local-flock/cli.ts",
+    "experiment:slow-peer": "bun run experiments/slow-peer.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --type-aware src tests experiments",

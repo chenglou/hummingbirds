@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 
@@ -9,9 +9,14 @@ import {
   startNetwork,
   stopNetwork,
   type RunningNetwork,
-} from "../src/harness.ts"
-import { headers } from "../src/protocol.ts"
-import { parseReadyMessage } from "../src/trace.ts"
+} from "../experiments/local-flock/harness.ts"
+import { parseReadyMessage } from "../experiments/local-flock/trace.ts"
+
+const headers = {
+  callerId: "x-hummingbirds-caller-id",
+  path: "x-hummingbirds-path",
+  requestId: "x-hummingbirds-request-id",
+} as const
 
 const temporaryDirectories: string[] = []
 
@@ -41,7 +46,11 @@ describe("Hummingbirds", () => {
     let network: RunningNetwork | null = null
 
     try {
-      network = await startNetwork(resolve("examples/scenario.json"), runDirectory, environment)
+      network = await startNetwork(
+        resolve("experiments/local-flock/scenario.json"),
+        runDirectory,
+        environment,
+      )
 
       const a = findNode(network, "a")
       const b = findNode(network, "b")
@@ -53,11 +62,11 @@ describe("Hummingbirds", () => {
       expect(await Bun.file(join(runDirectory, "a", "events.jsonl")).exists()).toBe(true)
       expect(new Set(network.nodes.map((node) => node.process.pid)).size).toBe(3)
       expect(new Set(network.nodes.map((node) => node.url)).size).toBe(3)
-      expect(await readFile(join(a.directory, "server.ts"), "utf8")).toBe(
-        await readFile(resolve("src/server.ts"), "utf8"),
-      )
+      expect(await Bun.file(join(a.directory, "server.ts")).exists()).toBe(false)
+      expect(await Bun.file(join(a.directory, "agent.ts")).exists()).toBe(false)
+      expect(await Bun.file(join(a.directory, "protocol.ts")).exists()).toBe(false)
 
-      const prompt = await readFile(resolve("src/prompt.md"), "utf8")
+      const prompt = await readFile(resolve("src/prompt_template.md"), "utf8")
       const aAgents = await readFile(join(a.directory, "AGENTS.md"), "utf8")
       expect(aAgents).toBe(
         prompt
@@ -98,7 +107,9 @@ describe("Hummingbirds", () => {
       if (aStart?.kind !== "codex_process_started" || aStart.codexEvents === null) {
         throw new Error("Missing Codex JSON trace")
       }
-      expect(await readFile(join(a.directory, aStart.codexEvents), "utf8")).toContain(
+      expect(
+        await readFile(join(runDirectory, "a", aStart.codexEvents), "utf8"),
+      ).toContain(
         '"type":"turn.completed"',
       )
 
@@ -165,7 +176,10 @@ describe("Hummingbirds", () => {
         ).length,
       ).toBe(startsBeforeCycle)
 
+      const poisonedTraceDirectory = join(a.directory, "codex-traces")
+      await mkdir(poisonedTraceDirectory)
       await Promise.all([
+        writeFile(join(poisonedTraceDirectory, "poison.jsonl"), "poisoned Codex trace\n"),
         writeFile(join(a.directory, "events.jsonl"), "poisoned workspace trace\n"),
         writeFile(join(a.directory, "thread-id"), "poisoned workspace thread\n"),
       ])
@@ -177,6 +191,9 @@ describe("Hummingbirds", () => {
         "poisoned workspace trace",
       )
       expect(await readFile(join(runDirectory, "a", "thread-id"), "utf8")).toBe(firstThreadId)
+      expect(
+        await Bun.file(join(runDirectory, "a", "codex-traces", "poison.jsonl")).exists(),
+      ).toBe(false)
       expect(await readFile(join(runDirectory, "a", aStart.codexEvents), "utf8")).toContain(
         '"type":"turn.completed"',
       )
@@ -285,6 +302,50 @@ describe("Hummingbirds", () => {
       if (network !== null) await stopNetwork(network)
     }
   }, 15_000)
+
+  test("keeps admitted request order when diagnostics are enabled", async () => {
+    const temporaryDirectory = await makeTemporaryDirectory()
+    const scenarioPath = join(temporaryDirectory, "scenario.json")
+    const runDirectory = join(temporaryDirectory, "run")
+    await writeFile(
+      scenarioPath,
+      `${JSON.stringify(
+        { entry: "solo", nodes: [{ id: "solo", peers: [], seed: "" }] },
+        null,
+        2,
+      )}\n`,
+    )
+    let network: RunningNetwork | null = null
+
+    try {
+      network = await startNetwork(scenarioPath, runDirectory, {
+        HUMMINGBIRDS_CODEX_COMMAND: JSON.stringify([
+          process.execPath,
+          "run",
+          resolve("tests/fake-codex.ts"),
+        ]),
+        HUMMINGBIRDS_FAKE_STATE_DIRECTORY: join(temporaryDirectory, "fake-codex"),
+      })
+      const activeNetwork = network
+      const requestIds = Array.from({ length: 20 }, (_, index) => `fifo-${index}`)
+      await Promise.all(
+        requestIds.map((requestId) =>
+          askNetwork(activeNetwork, `question ${requestId}`, requestId),
+        ),
+      )
+
+      const trace = await readTrace(runDirectory)
+      const admitted = trace
+        .filter((event) => event.kind === "request_received")
+        .map((event) => event.requestId)
+      const started = trace
+        .filter((event) => event.kind === "codex_process_started")
+        .map((event) => event.requestId)
+      expect(started).toEqual(admitted)
+    } finally {
+      if (network !== null) await stopNetwork(network)
+    }
+  }, 15_000)
 })
 
 async function makeTemporaryDirectory(): Promise<string> {
@@ -319,7 +380,7 @@ async function restartNode(
   await node.process.exited
   const eventLogPath = join(network.runDirectory, node.id, "events.jsonl")
   const child = Bun.spawn({
-    cmd: [process.execPath, "run", "server.ts"],
+    cmd: [process.execPath, "run", resolve("src/server.ts")],
     cwd: node.directory,
     env: {
       ...process.env,

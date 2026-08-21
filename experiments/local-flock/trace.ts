@@ -1,10 +1,60 @@
-import {
-  requireNumber,
-  requireRecord,
-  requireString,
-  type JsonObject,
-  type TraceEvent,
-} from "./protocol.ts"
+type JsonObject = Record<string, unknown>
+
+type EventBase = {
+  at: number
+  invocationId: string
+  nodeId: string
+  parentInvocationId: string | null
+  pid: number
+  requestId: string
+  seq: number
+}
+
+export type TraceEvent =
+  | (EventBase & {
+      callerId: string
+      kind: "request_received"
+      path: string[]
+      question: string
+    })
+  | (EventBase & {
+      callerId: string
+      kind: "cycle_rejected"
+      path: string[]
+      question: string
+    })
+  | (EventBase & {
+      agentPid: number
+      codexEvents: string | null
+      kind: "codex_process_started"
+      threadId: string | null
+    })
+  | (EventBase & {
+      agentPid: number
+      durationMs: number
+      kind: "codex_process_completed"
+      threadId: string
+    })
+  | (EventBase & {
+      agentPid: number
+      durationMs: number
+      error: string
+      exitCode: number
+      kind: "codex_process_failed"
+      threadId: string | null
+    })
+  | (EventBase & {
+      answer: string
+      durationMs: number
+      kind: "request_completed"
+      status: number
+    })
+  | (EventBase & {
+      durationMs: number
+      error: string
+      kind: "request_failed"
+      status: number
+    })
 
 type ReadyMessage = {
   id: string
@@ -110,6 +160,27 @@ function requireNullableString(record: JsonObject, key: string): string | null {
   const value = record[key]
   if (value !== null && typeof value !== "string") {
     throw new Error(`${key} must be a string or null`)
+  }
+  return value
+}
+
+function requireRecord(value: unknown, label: string): JsonObject {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`)
+  }
+  return value as JsonObject
+}
+
+function requireString(record: JsonObject, key: string): string {
+  const value = record[key]
+  if (typeof value !== "string") throw new Error(`${key} must be a string`)
+  return value
+}
+
+function requireNumber(record: JsonObject, key: string): number {
+  const value = record[key]
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new Error(`${key} must be a finite number`)
   }
   return value
 }

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -8,7 +8,7 @@ import {
   startNetwork,
   stopNetwork,
   type RunningNetwork,
-} from "../src/harness.ts"
+} from "./local-flock/harness.ts"
 
 export type SlowPeerObservation = {
   answerMatched: boolean
@@ -125,7 +125,8 @@ async function main(arguments_: string[]): Promise<void> {
 async function runTrial(config: Config, prompt: string, trial: number) {
   const rootDirectory = await mkdtemp(join(tmpdir(), "hummingbirds-slow-peer-"))
   const scenarioDirectory = join(rootDirectory, "scenario")
-  const runDirectory = join(rootDirectory, "run")
+  const suffix = `${new Date().toISOString().replaceAll(":", "-")}-${trial}-${crypto.randomUUID().slice(0, 8)}`
+  const runDirectory = resolve("logs", "slow-peer", suffix)
   const questionKey = crypto.randomUUID()
   const randomAnswer = `signal-${crypto.randomUUID()}`
   const question = `What exact signal is held by slow peer test ${questionKey}?`
@@ -213,7 +214,7 @@ async function runTrial(config: Config, prompt: string, trial: number) {
       throw new Error("Missing root Codex JSON trace")
     }
     const commandTrace = inspectCommandTrace(
-      await readFile(join(node.directory, start.codexEvents), "utf8"),
+      await readFile(join(runDirectory, node.id, start.codexEvents), "utf8"),
     )
     const observation: SlowPeerObservation = {
       answerMatched: answer.answer.includes(randomAnswer),
@@ -234,8 +235,15 @@ async function runTrial(config: Config, prompt: string, trial: number) {
       trial,
     }
   } finally {
-    if (network !== null) await stopNetwork(network)
-    await peer.stop(true)
+    try {
+      if (network !== null) await stopNetwork(network)
+    } finally {
+      try {
+        await peer.stop(true)
+      } finally {
+        await rm(rootDirectory, { force: true, recursive: true })
+      }
+    }
   }
 }
 
@@ -276,7 +284,7 @@ function parseArguments(arguments_: string[]): Config | null {
   let allowed = false
   let codex: string | null = null
   let delayMs = 45_000
-  let promptPath = resolve("src/prompt.md")
+  let promptPath = resolve("src/prompt_template.md")
   let trials = 4
 
   for (let index = 0; index < arguments_.length; index += 1) {
@@ -310,7 +318,7 @@ function parseArguments(arguments_: string[]): Config | null {
 function usage(): string {
   return [
     "Usage:",
-    "  bun run eval:slow-peer --run-real-model --codex <path> [--prompt <path>] [--trials 4] [--delay-ms 45000]",
+    "  bun run experiment:slow-peer --run-real-model --codex <path> [--prompt <path>] [--trials 4] [--delay-ms 45000]",
   ].join("\n")
 }
 
