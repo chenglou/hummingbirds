@@ -43,8 +43,10 @@ type CodexEvent = {
 
 const nodeId = basename(process.cwd())
 const codex = Bun.env["HUMMINGBIRDS_CODEX"] ?? "codex"
-// Top-level `codex` flags (for example `-m model` or `-c key=value`); they apply to
-// fresh and resumed turns alike.
+// Extra flags for the Codex turn, for example `-m model` or `-c key=value`. They go
+// after the subcommand because `codex` silently drops root-level `-c` overrides, so
+// they must be valid for both `codex exec` and `codex exec resume` (`-s`, `-C` and
+// the other exec-only flags are not).
 const codexArgs = (Bun.env["HUMMINGBIRDS_CODEX_ARGS"] ?? "")
   .split(/\s+/)
   .filter((arg) => arg !== "")
@@ -122,8 +124,8 @@ async function ask(
   ]
   const args =
     threadId === null
-      ? [...codexArgs, "--search", "exec", ...common, "-"]
-      : [...codexArgs, "--search", "exec", "resume", ...common, threadId, "-"]
+      ? ["--search", "exec", ...common, ...codexArgs, "-"]
+      : ["--search", "exec", "resume", ...common, ...codexArgs, threadId, "-"]
   const child = Bun.spawn([codex, ...args], {
     cwd: workspace,
     env: {
