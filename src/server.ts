@@ -92,12 +92,9 @@ async function handleRequest(request: Request): Promise<Response> {
   const question = await request.text()
   record(context, "received", { question })
 
-  // Slips are better heard about now than discovered in the log: a body that never
-  // made it into curl, or a question with nowhere to send the answer.
+  // Usually a reply whose body never made it into curl; better to hear about it now.
   if (question.trim() === "") return reject(400, "Empty message.", context)
-  if (inReplyTo === null && context.replyTo === null) {
-    return reject(400, `Missing ${headers.replyTo}.`, context)
-  }
+  // A message with no Reply-to is fine: a command, or a human who will read the log.
   // A question that already went through this bird is a cycle; nothing else would
   // stop it going round forever. A reply is not a question, so its path is fine.
   if (inReplyTo === null && context.path.includes(nodeId)) {
@@ -214,7 +211,7 @@ async function ask(
   if (threadId !== null && startedThreadId !== threadId) {
     throw new Error(`Codex resumed thread ${startedThreadId} instead of ${threadId}`)
   }
-  // What Codex says at the end of the turn goes nowhere; it is kept for inspection.
+  // What Codex says at the end of the turn reaches nobody; it is kept in the log.
   return { answer: answer ?? "", threadId: startedThreadId }
 }
 

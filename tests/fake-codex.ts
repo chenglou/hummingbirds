@@ -47,19 +47,22 @@ if (inReplyTo !== undefined) {
 } else {
   const requestId = envelope["Request"] ?? ""
   const replyTo = envelope["Reply-to"]
-  if (replyTo === undefined) throw new Error(`Question ${requestId} without a Reply-to`)
   const privateAnswer = answerFromPrivateKnowledge(agents, question)
+  let found: string | null = null
   if (privateAnswer !== null) {
-    await post(replyTo, `${privateAnswer}\n\nContributors: ${nodeId} at ${nodeAddress}`, requestId)
-  } else if (session.peers.length > 0 && question.includes("Nacre-")) {
+    found = `${privateAnswer}\n\nContributors: ${nodeId} at ${nodeAddress}`
+  } else if (replyTo !== undefined && session.peers.length > 0 && question.includes("Nacre-")) {
     const peer = session.peers.find((candidate) => candidate.id === "c") ?? session.peers[0]
     if (peer === undefined) throw new Error("Expected a peer")
     session.pending[requestId] = replyTo
     await post(peer.address, question, null)
     answer = `Asked ${peer.id} about ${requestId}; waiting.`
   } else {
-    await post(replyTo, `Handled by ${nodeId}: ${question}`, requestId)
+    found = `Handled by ${nodeId}: ${question}`
   }
+  // No Reply-to means nobody is expecting an answer; the closing words only get logged.
+  if (found !== null && replyTo !== undefined) await post(replyTo, found, requestId)
+  else if (found !== null) answer = found
 }
 
 await mkdir(".fake-codex", { recursive: true })

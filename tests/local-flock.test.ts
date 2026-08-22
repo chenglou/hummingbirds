@@ -166,8 +166,8 @@ describe("Hummingbirds", () => {
         1,
       )
 
-      // A cycle, a question with nowhere to send the answer, and an empty message are
-      // all turned away right away, busy or not.
+      // A cycle and an empty message are turned away right away, busy or not. A message
+      // with no return address is just one nobody needs a reply to: it gets its turn.
       const cycle = await fetch(solo.url, {
         method: "POST",
         headers: {
@@ -179,11 +179,8 @@ describe("Hummingbirds", () => {
       })
       expect([cycle.status, await cycle.text()]).toEqual([409, "Cycle rejected at solo."])
       expect(cycle.headers.get("x-hummingbirds-request-id")).toBe("q-cycle")
-      const nowhere = await fetch(solo.url, { method: "POST", body: "question with no reply-to" })
-      expect([nowhere.status, await nowhere.text()]).toEqual([
-        400,
-        "Missing x-hummingbirds-reply-to.",
-      ])
+      const command = await fetch(solo.url, { method: "POST", body: "just a command" })
+      expect(command.status).toBe(202)
       const empty = await fetch(solo.url, {
         method: "POST",
         headers: { "x-hummingbirds-reply-to": inbox.url },
@@ -199,10 +196,10 @@ describe("Hummingbirds", () => {
       const trace = await readTrace(directory)
       expect(
         trace.filter((event) => event.kind === "rejected").map((event) => event.error),
-      ).toEqual(["Cycle rejected at solo.", "Missing x-hummingbirds-reply-to.", "Empty message."])
+      ).toEqual(["Cycle rejected at solo.", "Empty message."])
       const turns = trace.filter((event) => event.kind === "started" || event.kind === "completed")
       expect(turns.map((event) => event.kind)).toEqual(
-        questions.flatMap(() => ["started", "completed"]),
+        [...questions, "command"].flatMap(() => ["started", "completed"]),
       )
       const rejected = new Set(
         trace.filter((event) => event.kind === "rejected").map((event) => event.invocationId),
@@ -216,17 +213,20 @@ describe("Hummingbirds", () => {
       expect(
         inbox.messages.map((message) => [message.from, message.inReplyTo, message.body]),
       ).toEqual(
-        admitted.map((requestId) => [
-          "solo",
-          requestId,
-          `Handled by solo: question ${requestId.slice("request-".length)}`,
-        ]),
+        admitted
+          .slice(0, -1)
+          .map((requestId) => [
+            "solo",
+            requestId,
+            `Handled by solo: question ${requestId.slice("request-".length)}`,
+          ]),
       )
+      expect(turns.at(-1)?.answer).toBe("Handled by solo: just a command")
       const threadId = turns[1]?.threadId
       expect(typeof threadId).toBe("string")
       expect(
         turns.filter((event) => event.kind === "started").map((event) => event.threadId),
-      ).toEqual([null, threadId, threadId, threadId, threadId])
+      ).toEqual([null, threadId, threadId, threadId, threadId, threadId])
     } finally {
       if (network !== null) await stopNetwork(network)
     }
