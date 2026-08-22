@@ -33,6 +33,8 @@ const session: Session =
 
 const delayMs = Number(Bun.env["HUMMINGBIRDS_FAKE_DELAY_MS"] ?? 0)
 if (delayMs > 0) await Bun.sleep(delayMs)
+emit({ thread_id: session.threadId, type: "thread.started" })
+let nextItemId = 0
 
 // Like the real Codex, the final message goes nowhere; only the POSTs matter.
 let answer = ""
@@ -71,16 +73,25 @@ if (inReplyTo !== undefined) {
 await mkdir(".fake-codex", { recursive: true })
 await writeFile(sessionPath(session.threadId), `${JSON.stringify(session, null, 2)}\n`)
 await appendFile(join(".fake-codex", "argv.jsonl"), `${JSON.stringify(process.argv.slice(2))}\n`)
-const events = [
-  { thread_id: session.threadId, type: "thread.started" },
-  { item: { id: "item_0", text: answer, type: "agent_message" }, type: "item.completed" },
-  { type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } },
-]
-process.stdout.write(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`)
+emit({
+  item: { id: `item_${nextItemId}`, text: answer, type: "agent_message" },
+  type: "item.completed",
+})
+emit({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })
 
 // POST like the prompt tells a bird to: a question when inReplyTo is null, a reply
 // otherwise. Either way the other side only acknowledges.
 async function post(address: string, body: string, inReplyTo: string | null): Promise<void> {
+  const command = `/bin/zsh -lc "curl -sS -X POST '${address}' --data-binary '${body.replaceAll("'", "'\\''")}'"`
+  const item = {
+    id: `item_${nextItemId++}`,
+    type: "command_execution",
+    command,
+    aggregated_output: "",
+    exit_code: null,
+    status: "in_progress",
+  }
+  emit({ type: "item.started", item })
   const response = await fetch(address, {
     method: "POST",
     headers: {
@@ -96,9 +107,17 @@ async function post(address: string, body: string, inReplyTo: string | null): Pr
     body,
   })
   const text = await response.text()
+  emit({
+    type: "item.completed",
+    item: { ...item, aggregated_output: text, exit_code: 0, status: "completed" },
+  })
   if (response.status !== 202) {
     throw new Error(`${address} returned ${response.status} instead of 202: ${text}`)
   }
+}
+
+function emit(event: object): void {
+  process.stdout.write(`${JSON.stringify(event)}\n`)
 }
 
 function sessionPath(threadId: string): string {

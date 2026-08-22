@@ -11,7 +11,6 @@ type Bird = {
 }
 
 type Event = {
-  answer?: string
   callerId: string
   error?: string
   inReplyTo: string | null
@@ -62,6 +61,8 @@ describe("Hummingbirds", () => {
       expect(output).toContain('"kind":"received"')
       expect(output).toContain('"type":"thread.started"')
       expect(output).toContain("Handled by bird: Remember Ben likes hiking.")
+      expect(output).not.toContain('"nodeId":')
+      expect(output).not.toContain("\u001b[")
 
       bird = await startBird(directory, {}, port)
       const restartedBird = bird
@@ -79,6 +80,8 @@ describe("Hummingbirds", () => {
   test("accepts typed terminal messages alongside HTTP on the same conversation", async () => {
     const directory = join(await makeTemporaryDirectory(), "interactive")
     await mkdir(directory, { recursive: true })
+    const peer = startInbox()
+    const peerAddress = new URL("/ask", peer.url).href
     const decoder = new TextDecoder()
     let output = ""
     const child = Bun.spawn([process.execPath, "run", resolve("src/server.ts")], {
@@ -89,6 +92,7 @@ describe("Hummingbirds", () => {
         HUMMINGBIRDS_DIRECTORY: join(directory, "bird"),
         HUMMINGBIRDS_FAKE_DELAY_MS: "100",
         HUMMINGBIRDS_NODE_ID: "interactive",
+        HUMMINGBIRDS_PEERS: `- b at ${peerAddress}`,
         HUMMINGBIRDS_PORT: "0",
       },
       terminal: {
@@ -114,16 +118,24 @@ describe("Hummingbirds", () => {
     try {
       await waitUntil(async () => output.includes('"id":"interactive"'))
       const ready = JSON.parse(output.split("\n")[0] ?? "") as { url: string }
+      await waitUntil(async () => Bun.stripANSI(output).includes(" You "))
 
       terminal.write("\nFirst typed message\n  \n")
       await waitUntil(async () => {
         return (await readEvents()).some((event) => event.question === "First typed message")
       })
+      await waitUntil(async () => {
+        return (Bun.stripANSI(output).split(/[\r\n]/).at(-1) ?? "").includes(" You ")
+      })
 
+      const httpMessage = "Ordinary HTTP message\n\u001b[31mSecond line\u001b[0m"
       const response = await fetch(ready.url, {
         method: "POST",
-        headers: { "x-hummingbirds-request-id": "q-http" },
-        body: "Ordinary HTTP message",
+        headers: {
+          "x-hummingbirds-caller-id": "peer-a",
+          "x-hummingbirds-request-id": "q-http",
+        },
+        body: httpMessage,
       })
       expect(response.status).toBe(202)
       terminal.write("Second typed message\n\n")
@@ -135,10 +147,10 @@ describe("Hummingbirds", () => {
       const incoming = trace.filter((event) => event.kind === "received")
       expect(incoming.map((event) => event.question)).toEqual([
         "First typed message",
-        "Ordinary HTTP message",
+        httpMessage,
         "Second typed message",
       ])
-      expect(incoming.map((event) => event.callerId)).toEqual(["human", "human", "human"])
+      expect(incoming.map((event) => event.callerId)).toEqual(["human", "peer-a", "human"])
 
       const turns = trace.filter((event) => event.kind === "started" || event.kind === "completed")
       expect(turns.map((event) => event.kind)).toEqual([
@@ -153,15 +165,76 @@ describe("Hummingbirds", () => {
       expect(turns.filter((event) => event.kind === "started").map((event) => event.threadId)).toEqual(
         [null, threadId, threadId],
       )
+      expect(
+        turns.filter((event) => event.kind === "completed").every((event) => !("answer" in event)),
+      ).toBe(true)
 
       await waitUntil(async () => output.includes("Handled by interactive: Second typed message"))
       expect(output).toContain('"kind":"received"')
       expect(output).toContain('"type":"thread.started"')
       expect(output).toContain('"type":"item.completed"')
+      const coloredOutput = output.replaceAll("\u001b", "ESC")
+      expect(coloredOutput).toMatch(/ESC\[90m\{"callerId":"human"/)
+      expect(coloredOutput).toMatch(/ESC\[90m\{"thread_id":/)
+      const promptColors = [...coloredOutput.matchAll(/ESC\[30;(10[1-6])m You ESC\[0m/g)].map(
+        (match) => match[1],
+      )
+      expect(promptColors.length).toBeGreaterThanOrEqual(2)
+      expect(promptColors.every((color) => color === promptColors[0])).toBe(true)
+      expect(coloredOutput).toMatch(
+        /ESC\[90m\{"item":\{[^\r\n]*"text":"Handled by interactive: First typed message"[^\r\n]*"type":"agent_message"\},"type":"item.completed"\}ESC\[0m\r?\nESC\[30;10[1-6]m interactive \(self\) ESC\[0m Handled by interactive: First typed message/,
+      )
+      expect(coloredOutput).not.toMatch(/ESC\[30;10[1-6]m H ESC\[0m/)
+      expect(coloredOutput).not.toMatch(/ESC\[30;10[1-6]m (P|peer-a) ESC\[0m/)
+      expect(coloredOutput).toMatch(
+        /ESC\[90m\{"callerId":"peer-a"[^\r\n]*"kind":"received"\}ESC\[0m\r?\n← peer-a  Ordinary HTTP message/,
+      )
+      const plainOutput = Bun.stripANSI(output)
+      expect(plainOutput).toContain(" You ")
+      expect(plainOutput).toMatch(/← peer-a  Ordinary HTTP message\r?\n {4}Second line\r?\n/)
+      expect(plainOutput).toMatch(
+        / interactive \(self\)  Handled by interactive: Ordinary HTTP message\r?\n {4}Second line\r?\n/,
+      )
+      const visibleLines = Bun.stripANSI(
+        output
+          .replaceAll("\u001b[2K", "\r")
+          .replaceAll("\u001b[0K", "\r")
+          .replaceAll("\u001b[1G", "\r"),
+      ).split(/[\r\n]/)
+      expect(visibleLines.filter((line) => line.includes(" You ") && line.includes('{"'))).toEqual([])
+      expect(output).not.toContain("\u001b[31m")
+      expect(await readFile(join(directory, "bird", "events.jsonl"), "utf8")).not.toContain(
+        "\u001b[",
+      )
+
+      terminal.write("What does b know about Nacre-A?\n")
+      await waitUntil(async () => {
+        return (
+          peer.messages.length === 1 &&
+          output.includes("→ b  What does b know about Nacre-A?") &&
+          (await readEvents()).filter((event) => event.kind === "completed").length === 4
+        )
+      })
+      expect(peer.messages[0]?.body).toBe("What does b know about Nacre-A?")
+      const outboundOutput = output.replaceAll("\u001b", "ESC")
+      expect(outboundOutput).toMatch(
+        /ESC\[90m\{"type":"item.started","item":\{[^\r\n]*"type":"command_execution"[^\r\n]*\}\}ESC\[0m\r?\n→ b  What does b know about Nacre-A\?\r?\n/,
+      )
+      expect(outboundOutput.match(/→ b  What does b know about Nacre-A\?/g)).toHaveLength(1)
+      const executions = Bun.stripANSI(output)
+        .split(/[\r\n]/)
+        .filter(
+          (line) => line.startsWith('{"type":"item.') && line.includes('"type":"command_execution"'),
+        )
+        .map((line) => JSON.parse(line) as { item: { command: string; id: string }; type: string })
+      expect(executions.map((event) => event.type)).toEqual(["item.started", "item.completed"])
+      expect(executions[0]?.item.id).toBe(executions[1]?.item.id)
+      expect(executions[0]?.item.command).toBe(executions[1]?.item.command)
     } finally {
       if (child.exitCode === null) child.kill()
       await child.exited
       terminal.close()
+      peer.stop()
     }
   }, 15_000)
 
@@ -193,9 +266,9 @@ describe("Hummingbirds", () => {
         )
       })
       const trainingReply = (await events(a)).find(
-        (event) => event.kind === "completed" && event.inReplyTo === "q-train",
+        (event) => event.kind === "received" && event.inReplyTo === "q-train",
       )
-      expect(trainingReply?.answer).toBe(`Amber Tern-417.\n\nContributors: c at ${c.url}`)
+      expect(trainingReply?.question).toBe(`Amber Tern-417.\n\nContributors: c at ${c.url}`)
       expect(received(await events(a), "q-train")).toEqual([
         ["human", null, null, []],
         ["b", b.url, "q-train", ["a", "b"]],
@@ -220,9 +293,9 @@ describe("Hummingbirds", () => {
         )
       })
       const probeReply = (await events(a)).find(
-        (event) => event.kind === "completed" && event.inReplyTo === "q-probe",
+        (event) => event.kind === "received" && event.inReplyTo === "q-probe",
       )
-      expect(probeReply?.answer).toBe(`Violet Shoal-862.\n\nContributors: c at ${c.url}`)
+      expect(probeReply?.question).toBe(`Violet Shoal-862.\n\nContributors: c at ${c.url}`)
       expect(received(await events(a), "q-probe")).toEqual([
         ["human", null, null, []],
         ["c", c.url, "q-probe", ["a", "c"]],
@@ -279,7 +352,10 @@ describe("Hummingbirds", () => {
         admitted,
       )
       expect(inbox.messages).toHaveLength(5)
-      expect(turns.at(-1)?.answer).toBe("Handled by solo: just a command")
+      await stopBird(bird)
+      expect(await readRemainingOutput(bird.process.stdout)).toContain(
+        "Handled by solo: just a command",
+      )
     } finally {
       await stopBird(bird)
       inbox.stop()

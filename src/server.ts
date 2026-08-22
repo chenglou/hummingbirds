@@ -8,7 +8,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { rename } from "fs/promises"
 import { basename, join, resolve } from "path"
-import { createInterface } from "readline"
+import { createInterface, type Interface } from "readline"
 
 const headers = {
   callerId: "x-hummingbirds-caller-id",
@@ -33,18 +33,16 @@ type Context = {
 type Event = Context & {
   at: number
   kind: "received" | "rejected" | "started" | "completed" | "failed"
-  nodeId: string
   question?: string
   threadId?: string | null
   codexPid?: number
-  answer?: string
   error?: string
 }
 
 type CodexEvent = {
   type?: string
   thread_id?: string
-  item?: { type?: string; text?: string }
+  item?: { type?: string; text?: string; command?: string }
 }
 
 const directory = resolve(Bun.env["HUMMINGBIRDS_DIRECTORY"] ?? "bird")
@@ -61,7 +59,9 @@ const codexArgs = (Bun.env["HUMMINGBIRDS_CODEX_ARGS"] ?? "")
 const workspace = join(directory, "workspace")
 const threadIdPath = join(directory, "thread-id")
 const eventsPath = join(directory, "events.jsonl")
+const interactive = process.stdout.isTTY === true
 let queue: Promise<unknown> = Promise.resolve()
+let terminal: Interface | null = null
 
 mkdirSync(workspace, { recursive: true })
 
@@ -87,10 +87,34 @@ console.log(JSON.stringify({ id: nodeId, pid: process.pid, url: address }))
 if (process.stdin.isTTY === true) void readTerminal().catch(console.error)
 
 async function readTerminal(): Promise<void> {
-  for await (const line of createInterface({ input: process.stdin, terminal: false })) {
-    if (line.trim() === "") continue
-    await handleRequest(new Request(address, { method: "POST", body: line }))
+  const background = 101 + Number(Bun.hash.wyhash("human") % 6n)
+  const prompt = `\x1b[30;${background}m You \x1b[0m `
+  const input = createInterface({ input: process.stdin, output: process.stdout, prompt, terminal: interactive })
+  if (interactive) {
+    terminal = input
+    input.on("SIGINT", () => {
+      input.close()
+      process.kill(process.pid, "SIGINT")
+    })
+    input.prompt()
   }
+  for await (const line of input) {
+    if (line.trim() !== "") {
+      await handleRequest(new Request(address, { method: "POST", body: line }))
+    }
+    if (interactive) renderTerminal("")
+  }
+  if (terminal === input) terminal = null
+}
+
+function renderTerminal(text: string): void {
+  if (terminal === null) {
+    process.stdout.write(text)
+    return
+  }
+  process.stdout.write(`\r\x1b[2K${text}`)
+  terminal.prompt(true)
+  process.stdout.write(terminal.line)
 }
 
 async function handleRequest(request: Request): Promise<Response> {
@@ -130,8 +154,8 @@ async function runTurn(question: string, context: Context): Promise<void> {
   const turn = queue.then(() => ask(question, context))
   queue = turn.catch(() => {})
   try {
-    const { answer, threadId } = await turn
-    record(context, "completed", { answer, threadId })
+    const threadId = await turn
+    record(context, "completed", { threadId })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     // Nobody saw the turn fail, so tell the asker the same way the bird itself would
@@ -161,10 +185,7 @@ async function reportFailure(message: string, context: Context): Promise<void> {
   }).catch(() => {})
 }
 
-async function ask(
-  question: string,
-  context: Context,
-): Promise<{ answer: string; threadId: string }> {
+async function ask(question: string, context: Context): Promise<string> {
   const threadIdFile = Bun.file(threadIdPath)
   const threadId = (await threadIdFile.exists()) ? (await threadIdFile.text()).trim() : null
   // The conversation is the bird's only memory, so never quietly start a new one.
@@ -204,22 +225,12 @@ async function ask(
     stderr: "pipe",
   })
   record(context, "started", { codexPid: child.pid, threadId })
-  const [stdout, , exitCode] = await Promise.all([
-    readCodexOutput(child.stdout),
+  const [startedThreadId, , exitCode] = await Promise.all([
+    readCodexOutput(child.stdout, context),
     new Response(child.stderr).text(),
     child.exited,
   ])
 
-  let startedThreadId: string | null = null
-  let answer: string | null = null
-  for (const line of stdout.split("\n")) {
-    const event = parseEvent(line)
-    if (event === null) continue
-    if (event.type === "thread.started") startedThreadId = event.thread_id ?? null
-    if (event.type === "item.completed" && event.item?.type === "agent_message") {
-      answer = event.item.text ?? null
-    }
-  }
   if (threadId === null && startedThreadId !== null) {
     await Bun.write(`${threadIdPath}.tmp`, startedThreadId)
     await rename(`${threadIdPath}.tmp`, threadIdPath)
@@ -231,18 +242,113 @@ async function ask(
   if (threadId !== null && startedThreadId !== threadId) {
     throw new Error(`Codex resumed thread ${startedThreadId} instead of ${threadId}`)
   }
-  // What Codex says at the end of the turn reaches nobody; it is kept in the log.
-  return { answer: answer ?? "", threadId: startedThreadId }
+  return startedThreadId
 }
 
-async function readCodexOutput(stream: ReadableStream<Uint8Array>): Promise<string> {
+async function readCodexOutput(
+  stream: ReadableStream<Uint8Array>,
+  context: Context,
+): Promise<string | null> {
   const decoder = new TextDecoder()
-  let output = ""
-  for await (const chunk of stream) {
-    process.stdout.write(chunk)
-    output += decoder.decode(chunk, { stream: true })
+  let pending = ""
+  let startedThreadId: string | null = null
+
+  function readLines(lines: string[]): void {
+    let display = ""
+    for (const line of lines) {
+      const event = parseEvent(line)
+      if (event?.type === "thread.started") startedThreadId = event.thread_id ?? null
+      if (!interactive) continue
+      display += `\x1b[90m${line}\x1b[0m\n`
+      if (
+        event?.type === "item.started" &&
+        event.item?.type === "command_execution" &&
+        event.item.command !== undefined
+      ) {
+        const outgoing = outgoingMessage(event.item.command, context)
+        if (outgoing !== null) {
+          display += formatMessage(`→ ${outgoing.recipient}`, outgoing.message)
+        }
+      }
+      if (
+        event?.type === "item.completed" &&
+        event.item?.type === "agent_message" &&
+        event.item.text !== undefined &&
+        event.item.text !== ""
+      ) {
+        display += formatMessage(`${nodeId} (self)`, event.item.text, nodeId)
+      }
+    }
+    if (interactive) renderTerminal(display)
   }
-  return output + decoder.decode()
+
+  for await (const chunk of stream) {
+    if (!interactive) process.stdout.write(chunk)
+    pending += decoder.decode(chunk, { stream: true })
+    const newline = pending.lastIndexOf("\n")
+    if (newline < 0) continue
+    readLines(pending.slice(0, newline).split("\n"))
+    pending = pending.slice(newline + 1)
+  }
+  pending += decoder.decode()
+  if (pending !== "") readLines([pending])
+  return startedThreadId
+}
+
+function outgoingMessage(
+  command: string,
+  context: Context,
+): { recipient: string; message: string } | null {
+  let words = shellWords(command)
+  const script = words.find((word) => /(?:^|\s)(?:\S+\/)?curl\s/.test(word))
+  if (script !== undefined) words = shellWords(script)
+
+  const curl = words.findIndex((word) => word === "curl" || word.endsWith("/curl"))
+  if (curl < 0) return null
+  const target = words
+    .slice(curl + 1)
+    .find((word) => /^https?:\/\/\S+\/ask(?:\?\S*)?$/.test(word))
+  if (target === undefined) return null
+
+  const data = words.findIndex((word) => /^(?:--data(?:-binary|-raw)?|-d)(?:=.*)?$/.test(word))
+  const option = words[data]
+  if (option === undefined) return null
+  const separator = option.indexOf("=")
+  const message = separator < 0 ? words[data + 1] : option.slice(separator + 1)
+  if (message === undefined) return null
+
+  if (context.replyTo === target) return { recipient: context.callerId, message }
+  const configuredPeers = Bun.env["HUMMINGBIRDS_PEERS"] ?? readFileSync(agentsPath, "utf8")
+  for (const match of configuredPeers.matchAll(/^\s*-\s+(\S+)\s+at\s+(\S+)/gm)) {
+    if (match[2] === target) return { recipient: match[1] ?? target, message }
+  }
+  return { recipient: target, message }
+}
+
+function shellWords(command: string): string[] {
+  const words: string[] = []
+  let word = ""
+  let quote: "'" | '"' | null = null
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command.charAt(index)
+    if (character === quote) {
+      quote = null
+    } else if (quote === null && (character === "'" || character === '"')) {
+      quote = character
+    } else if (character === "\\" && quote !== "'") {
+      index += 1
+      const escaped = command.charAt(index)
+      if (escaped !== "\n") word += escaped
+    } else if (quote === null && /\s/.test(character)) {
+      if (word !== "") words.push(word)
+      word = ""
+    } else {
+      word += character
+    }
+  }
+  if (word !== "") words.push(word)
+  return words
 }
 
 // The path this bird's own calls carry. A reply comes back with the path the question
@@ -265,10 +371,25 @@ function envelope(question: string, context: Context): string {
 }
 
 function record(context: Context, kind: Event["kind"], extra: Partial<Event> = {}): void {
-  const event: Event = { ...context, ...extra, at: Date.now(), kind, nodeId }
+  const event: Event = { ...context, ...extra, at: Date.now(), kind }
   const line = `${JSON.stringify(event)}\n`
   appendFileSync(eventsPath, line)
-  process.stdout.write(line)
+  if (!interactive) {
+    process.stdout.write(line)
+    return
+  }
+  let display = `\x1b[90m${line.slice(0, -1)}\x1b[0m\n`
+  if (kind === "received" && context.callerId !== "human") {
+    display += formatMessage(`← ${context.callerId}`, extra.question ?? "")
+  }
+  renderTerminal(display)
+}
+
+function formatMessage(label: string, text: string, sender?: string): string {
+  const message = Bun.stripANSI(text).replaceAll("\n", "\n    ")
+  if (sender === undefined) return `${Bun.stripANSI(label)}  ${message}\n`
+  const background = 101 + Number(Bun.hash.wyhash(sender) % 6n)
+  return `\x1b[30;${background}m ${Bun.stripANSI(label)} \x1b[0m ${message}\n`
 }
 
 function reject(status: number, body: string, context: Context): Response {
