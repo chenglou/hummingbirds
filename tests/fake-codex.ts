@@ -9,7 +9,7 @@ import { appendFile, mkdir, readFile, writeFile } from "fs/promises"
 import { join } from "path"
 
 type Peer = { address: string; id: string }
-type Session = { peers: Peer[]; pending: Record<string, string>; threadId: string }
+type Session = { peers: Peer[]; pending: Record<string, string | null>; threadId: string }
 
 const nodeId = Bun.env["HUMMINGBIRDS_NODE_ID"] ?? ""
 const nodeAddress = Bun.env["HUMMINGBIRDS_NODE_ADDRESS"] ?? ""
@@ -39,11 +39,14 @@ let answer = ""
 const inReplyTo = envelope["Re"]
 if (inReplyTo !== undefined) {
   // A peer answered something we asked on someone's behalf: pass it along.
-  const askedBy = session.pending[inReplyTo]
-  if (askedBy === undefined) throw new Error(`Unexpected reply to ${inReplyTo}`)
+  if (!Object.hasOwn(session.pending, inReplyTo)) {
+    throw new Error(`Unexpected reply to ${inReplyTo}`)
+  }
+  const askedBy = session.pending[inReplyTo] ?? null
   delete session.pending[inReplyTo]
   learnContributors(session.peers, question)
-  await post(askedBy, question, inReplyTo)
+  if (askedBy === null) answer = question
+  else await post(askedBy, question, inReplyTo)
 } else {
   const requestId = envelope["Request"] ?? ""
   const replyTo = envelope["Reply-to"]
@@ -51,10 +54,10 @@ if (inReplyTo !== undefined) {
   let found: string | null = null
   if (privateAnswer !== null) {
     found = `${privateAnswer}\n\nContributors: ${nodeId} at ${nodeAddress}`
-  } else if (replyTo !== undefined && session.peers.length > 0 && question.includes("Nacre-")) {
+  } else if (session.peers.length > 0 && question.includes("Nacre-")) {
     const peer = session.peers.find((candidate) => candidate.id === "c") ?? session.peers[0]
     if (peer === undefined) throw new Error("Expected a peer")
-    session.pending[requestId] = replyTo
+    session.pending[requestId] = replyTo ?? null
     await post(peer.address, question, null)
     answer = `Asked ${peer.id} about ${requestId}; waiting.`
   } else {

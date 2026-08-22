@@ -1,13 +1,14 @@
 // One bird: an HTTP server that hands each message to a persistent Codex
-// conversation. Run it inside the bird's directory, which holds:
+// conversation. `bun start` keeps its directory in bird/, which holds:
 //   thread-id     the Codex conversation to resume (created on the first message)
 //   events.jsonl  a log of every message, for inspection only
 //   workspace/    Codex's working directory, where AGENTS.md tells the bird who it is
 // Nobody waits on the line: a message is acknowledged at once, the turn runs in its
 // own time, and the bird POSTs whatever it has to say to the message's Reply-to address.
-import { appendFileSync, mkdirSync } from "fs"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
 import { rename } from "fs/promises"
-import { basename, join } from "path"
+import { basename, join, resolve } from "path"
+import { createInterface } from "readline"
 
 const headers = {
   callerId: "x-hummingbirds-caller-id",
@@ -29,11 +30,10 @@ type Context = {
   requestId: string
 }
 
-export type Event = Context & {
+type Event = Context & {
   at: number
   kind: "received" | "rejected" | "started" | "completed" | "failed"
   nodeId: string
-  seq: number
   question?: string
   threadId?: string | null
   codexPid?: number
@@ -47,7 +47,8 @@ type CodexEvent = {
   item?: { type?: string; text?: string }
 }
 
-const nodeId = basename(process.cwd())
+const directory = resolve(Bun.env["HUMMINGBIRDS_DIRECTORY"] ?? "bird")
+const nodeId = Bun.env["HUMMINGBIRDS_NODE_ID"] ?? basename(directory)
 const codex = Bun.env["HUMMINGBIRDS_CODEX"] ?? "codex"
 // Extra flags for the Codex turn, for example `-m model` or `-c key=value`, split on
 // whitespace (no shell quoting: a literal space always splits). They go after the
@@ -57,21 +58,40 @@ const codex = Bun.env["HUMMINGBIRDS_CODEX"] ?? "codex"
 const codexArgs = (Bun.env["HUMMINGBIRDS_CODEX_ARGS"] ?? "")
   .split(/\s+/)
   .filter((arg) => arg !== "")
-const workspace = join(process.cwd(), "workspace")
-const threadIdPath = join(process.cwd(), "thread-id")
-const eventsPath = join(process.cwd(), "events.jsonl")
+const workspace = join(directory, "workspace")
+const threadIdPath = join(directory, "thread-id")
+const eventsPath = join(directory, "events.jsonl")
 let queue: Promise<unknown> = Promise.resolve()
-let seq = 0
 
 mkdirSync(workspace, { recursive: true })
 
 const server = Bun.serve({
   hostname: "127.0.0.1",
-  port: Number(Bun.env["HUMMINGBIRDS_PORT"] ?? 0),
+  port: Number(Bun.env["HUMMINGBIRDS_PORT"] ?? 3000),
   fetch: handleRequest,
 })
 const address = `http://127.0.0.1:${server.port}/ask`
+const agentsPath = join(workspace, "AGENTS.md")
+if (!existsSync(agentsPath)) {
+  const prompt = readFileSync(join(import.meta.dir, "prompt_template.md"), "utf8")
+  writeFileSync(
+    agentsPath,
+    prompt
+      .replaceAll("[id]", nodeId)
+      .replaceAll("[address]", address)
+      .replaceAll("[peers]", Bun.env["HUMMINGBIRDS_PEERS"] ?? "(none)")
+      .replaceAll("[seed]", Bun.env["HUMMINGBIRDS_SEED"] ?? "(none)"),
+  )
+}
 console.log(JSON.stringify({ id: nodeId, pid: process.pid, url: address }))
+if (process.stdin.isTTY === true) void readTerminal().catch(console.error)
+
+async function readTerminal(): Promise<void> {
+  for await (const line of createInterface({ input: process.stdin, terminal: false })) {
+    if (line.trim() === "") continue
+    await handleRequest(new Request(address, { method: "POST", body: line }))
+  }
+}
 
 async function handleRequest(request: Request): Promise<Response> {
   if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
@@ -184,8 +204,8 @@ async function ask(
     stderr: "pipe",
   })
   record(context, "started", { codexPid: child.pid, threadId })
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
+  const [stdout, , exitCode] = await Promise.all([
+    readCodexOutput(child.stdout),
     new Response(child.stderr).text(),
     child.exited,
   ])
@@ -205,14 +225,24 @@ async function ask(
     await rename(`${threadIdPath}.tmp`, threadIdPath)
   }
 
-  if (exitCode !== 0)
-    throw new Error(`Codex exited with ${exitCode}: ${stderr.trim().slice(-2000)}`)
+  // Codex diagnostics can include credentials; never log or forward them to another bird.
+  if (exitCode !== 0) throw new Error(`Codex exited with ${exitCode}`)
   if (startedThreadId === null) throw new Error("Codex did not report a thread ID")
   if (threadId !== null && startedThreadId !== threadId) {
     throw new Error(`Codex resumed thread ${startedThreadId} instead of ${threadId}`)
   }
   // What Codex says at the end of the turn reaches nobody; it is kept in the log.
   return { answer: answer ?? "", threadId: startedThreadId }
+}
+
+async function readCodexOutput(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const decoder = new TextDecoder()
+  let output = ""
+  for await (const chunk of stream) {
+    process.stdout.write(chunk)
+    output += decoder.decode(chunk, { stream: true })
+  }
+  return output + decoder.decode()
 }
 
 // The path this bird's own calls carry. A reply comes back with the path the question
@@ -235,8 +265,10 @@ function envelope(question: string, context: Context): string {
 }
 
 function record(context: Context, kind: Event["kind"], extra: Partial<Event> = {}): void {
-  const event: Event = { ...context, ...extra, at: Date.now(), kind, nodeId, seq: seq++ }
-  appendFileSync(eventsPath, `${JSON.stringify(event)}\n`)
+  const event: Event = { ...context, ...extra, at: Date.now(), kind, nodeId }
+  const line = `${JSON.stringify(event)}\n`
+  appendFileSync(eventsPath, line)
+  process.stdout.write(line)
 }
 
 function reject(status: number, body: string, context: Context): Response {
