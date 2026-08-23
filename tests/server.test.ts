@@ -12,16 +12,19 @@ type Bird = {
 
 type Event = {
   callerId: string
-  error?: string
   inReplyTo: string | null
   invocationId: string
-  kind: "received" | "rejected" | "started" | "completed" | "failed"
   path: string[]
-  question?: string
   replyTo: string | null
   requestId: string
-  threadId?: string | null
-}
+} & (
+  | { kind: "received"; question: string }
+  | { kind: "delivered"; question: string }
+  | { kind: "rejected"; error: string }
+  | { kind: "failed"; error: string }
+  | { kind: "started"; threadId: string | null }
+  | { kind: "completed"; threadId: string }
+)
 
 type Message = { body: string; from: string; inReplyTo: string | null }
 
@@ -81,7 +84,6 @@ describe("Hummingbirds", () => {
     const directory = join(await makeTemporaryDirectory(), "interactive")
     await mkdir(directory, { recursive: true })
     const peer = startInbox()
-    const peerAddress = new URL("/ask", peer.url).href
     const decoder = new TextDecoder()
     let output = ""
     const child = Bun.spawn([process.execPath, "run", resolve("src/server.ts")], {
@@ -92,7 +94,7 @@ describe("Hummingbirds", () => {
         HUMMINGBIRDS_DIRECTORY: join(directory, "bird"),
         HUMMINGBIRDS_FAKE_DELAY_MS: "100",
         HUMMINGBIRDS_NODE_ID: "interactive",
-        HUMMINGBIRDS_PEERS: `- b at ${peerAddress}`,
+        HUMMINGBIRDS_PEERS: `- b at ${peer.url}`,
         HUMMINGBIRDS_PORT: "0",
       },
       terminal: {
@@ -106,30 +108,33 @@ describe("Hummingbirds", () => {
     const terminal = child.terminal
     if (terminal === undefined) throw new Error("Bird did not start in a terminal")
 
-    const readEvents = async (): Promise<Event[]> => {
-      const file = Bun.file(join(directory, "bird", "events.jsonl"))
-      if (!(await file.exists())) return []
-      return (await file.text())
-        .split("\n")
-        .filter((line) => line !== "")
-        .map((line) => JSON.parse(line) as Event)
-    }
-
     try {
       await waitUntil(async () => output.includes('"id":"interactive"'))
       const ready = JSON.parse(output.split("\n")[0] ?? "") as { url: string }
+      const bird = { directory, url: ready.url }
       await waitUntil(async () => Bun.stripANSI(output).includes(" You "))
 
       terminal.write("\nFirst typed message\n  \n")
       await waitUntil(async () => {
-        return (await readEvents()).some((event) => event.question === "First typed message")
+        return (await events(bird)).some(
+          (event) => event.kind === "received" && event.question === "First typed message",
+        )
       })
+      const humanAddress = (await events(bird)).find(
+        (event) => event.kind === "received" && event.question === "First typed message",
+      )?.replyTo
+      if (humanAddress === undefined || humanAddress === null) {
+        throw new Error("Typed message did not provide a return address")
+      }
+      const humanUrl = new URL(humanAddress)
+      expect([humanUrl.hostname, humanUrl.pathname]).toEqual(["127.0.0.1", "/ask"])
+      expect(humanUrl.port).not.toBe(new URL(bird.url).port)
       await waitUntil(async () => {
         return (Bun.stripANSI(output).split(/[\r\n]/).at(-1) ?? "").includes(" You ")
       })
 
       const httpMessage = "Ordinary HTTP message\n\u001b[31mSecond line\u001b[0m"
-      const response = await fetch(ready.url, {
+      const response = await fetch(bird.url, {
         method: "POST",
         headers: {
           "x-hummingbirds-caller-id": "peer-a",
@@ -141,9 +146,9 @@ describe("Hummingbirds", () => {
       terminal.write("Second typed message\n\n")
 
       await waitUntil(async () => {
-        return (await readEvents()).filter((event) => event.kind === "completed").length === 3
+        return (await events(bird)).filter((event) => event.kind === "completed").length === 3
       })
-      const trace = await readEvents()
+      const trace = await events(bird)
       const incoming = trace.filter((event) => event.kind === "received")
       expect(incoming.map((event) => event.question)).toEqual([
         "First typed message",
@@ -151,6 +156,16 @@ describe("Hummingbirds", () => {
         "Second typed message",
       ])
       expect(incoming.map((event) => event.callerId)).toEqual(["human", "peer-a", "human"])
+      expect(incoming.map((event) => event.replyTo)).toEqual([humanAddress, null, humanAddress])
+      const deliveries = trace.filter((event) => event.kind === "delivered")
+      expect(deliveries.map((event) => event.question)).toEqual([
+        "Handled by interactive: First typed message",
+        "Handled by interactive: Second typed message",
+      ])
+      expect(deliveries.map((event) => event.callerId)).toEqual(["interactive", "interactive"])
+      expect(deliveries.map((event) => event.inReplyTo)).toEqual(
+        incoming.filter((event) => event.callerId === "human").map((event) => event.requestId),
+      )
 
       const turns = trace.filter((event) => event.kind === "started" || event.kind === "completed")
       expect(turns.map((event) => event.kind)).toEqual([
@@ -182,10 +197,11 @@ describe("Hummingbirds", () => {
       expect(promptColors.length).toBeGreaterThanOrEqual(2)
       expect(promptColors.every((color) => color === promptColors[0])).toBe(true)
       expect(coloredOutput).toMatch(
-        /ESC\[90m\{"item":\{[^\r\n]*"text":"Handled by interactive: First typed message"[^\r\n]*"type":"agent_message"\},"type":"item.completed"\}ESC\[0m\r?\nESC\[30;10[1-6]m interactive \(self\) ESC\[0m Handled by interactive: First typed message/,
+        /ESC\[90m\{"callerId":"interactive"[^\r\n]*"question":"Handled by interactive: First typed message"[^\r\n]*"kind":"delivered"\}ESC\[0m\r?\nESC\[30;10[1-6]m interactive ESC\[0m Handled by interactive: First typed message/,
       )
       expect(coloredOutput).not.toMatch(/ESC\[30;10[1-6]m H ESC\[0m/)
       expect(coloredOutput).not.toMatch(/ESC\[30;10[1-6]m (P|peer-a) ESC\[0m/)
+      expect(coloredOutput).not.toMatch(/ESC\[30;10[1-6]m interactive \(self\) ESC\[0m/)
       expect(coloredOutput).toMatch(
         /ESC\[90m\{"callerId":"peer-a"[^\r\n]*"kind":"received"\}ESC\[0m\r?\n← peer-a  Ordinary HTTP message/,
       )
@@ -193,8 +209,9 @@ describe("Hummingbirds", () => {
       expect(plainOutput).toContain(" You ")
       expect(plainOutput).toMatch(/← peer-a  Ordinary HTTP message\r?\n {4}Second line\r?\n/)
       expect(plainOutput).toMatch(
-        / interactive \(self\)  Handled by interactive: Ordinary HTTP message\r?\n {4}Second line\r?\n/,
+        /interactive: Handled by interactive: Ordinary HTTP message\r?\n {4}Second line\r?\n/,
       )
+      expect(plainOutput).not.toContain("→ human")
       const visibleLines = Bun.stripANSI(
         output
           .replaceAll("\u001b[2K", "\r")
@@ -207,29 +224,92 @@ describe("Hummingbirds", () => {
         "\u001b[",
       )
 
-      terminal.write("What does b know about Nacre-A?\n")
+      const peerMessage = "What does b know about Nacre-A's path C:\\harbor?"
+      terminal.write(`${peerMessage}\n`)
       await waitUntil(async () => {
         return (
           peer.messages.length === 1 &&
-          output.includes("→ b  What does b know about Nacre-A?") &&
-          (await readEvents()).filter((event) => event.kind === "completed").length === 4
+          output.includes(`→ b  ${peerMessage}`) &&
+          (await events(bird)).filter((event) => event.kind === "completed").length === 4
         )
       })
-      expect(peer.messages[0]?.body).toBe("What does b know about Nacre-A?")
+      expect(peer.messages[0]?.body).toBe(peerMessage)
       const outboundOutput = output.replaceAll("\u001b", "ESC")
       expect(outboundOutput).toMatch(
-        /ESC\[90m\{"type":"item.started","item":\{[^\r\n]*"type":"command_execution"[^\r\n]*\}\}ESC\[0m\r?\n→ b  What does b know about Nacre-A\?\r?\n/,
+        /ESC\[90m\{"type":"item.started","item":\{[^\r\n]*"type":"command_execution"[^\r\n]*\}\}ESC\[0m\r?\n→ b  What does b know about Nacre-A's path C:\\harbor\?\r?\n/,
       )
-      expect(outboundOutput.match(/→ b  What does b know about Nacre-A\?/g)).toHaveLength(1)
+      expect(
+        outboundOutput.match(/→ b  What does b know about Nacre-A's path C:\\harbor\?/g),
+      ).toHaveLength(1)
       const executions = Bun.stripANSI(output)
         .split(/[\r\n]/)
         .filter(
-          (line) => line.startsWith('{"type":"item.') && line.includes('"type":"command_execution"'),
+          (line) =>
+            line.startsWith('{"type":"item.') &&
+            line.includes('"type":"command_execution"') &&
+            line.includes(peer.url),
         )
         .map((line) => JSON.parse(line) as { item: { command: string; id: string }; type: string })
       expect(executions.map((event) => event.type)).toEqual(["item.started", "item.completed"])
       expect(executions[0]?.item.id).toBe(executions[1]?.item.id)
       expect(executions[0]?.item.command).toBe(executions[1]?.item.command)
+
+      const peerQuestion = (await events(bird)).find(
+        (event) => event.kind === "received" && event.question === peerMessage,
+      )
+      if (peerQuestion === undefined) throw new Error("Missing peer question")
+      const peerReply = await fetch(bird.url, {
+        method: "POST",
+        headers: {
+          "x-hummingbirds-caller-id": "b",
+          "x-hummingbirds-in-reply-to": peerQuestion.requestId,
+          "x-hummingbirds-path": JSON.stringify(["interactive", "b"]),
+          "x-hummingbirds-reply-to": peer.url,
+          "x-hummingbirds-request-id": peerQuestion.requestId,
+        },
+        body: "B knows Nacre-A.",
+      })
+      expect([peerReply.status, await peerReply.text()]).toEqual([202, "Accepted by interactive."])
+      await waitUntil(async () => {
+        const updatedTrace = await events(bird)
+        return (
+          updatedTrace.some(
+            (event) =>
+              event.kind === "delivered" &&
+              event.inReplyTo === peerQuestion.requestId &&
+              event.question === "B knows Nacre-A.",
+          ) &&
+          updatedTrace.some(
+            (event) => event.kind === "completed" && event.inReplyTo === peerQuestion.requestId,
+          ) &&
+          Bun.stripANSI(output).includes("interactive  B knows Nacre-A.")
+        )
+      })
+      const deliveredReply = (await events(bird)).find(
+        (event) => event.kind === "delivered" && event.inReplyTo === peerQuestion.requestId,
+      )
+      expect(deliveredReply?.callerId).toBe("interactive")
+      expect(deliveredReply?.requestId).toBe(peerQuestion.requestId)
+      expect(deliveredReply?.replyTo).toBe(bird.url)
+      expect(output.replaceAll("\u001b", "ESC")).toMatch(
+        /ESC\[30;10[1-6]m interactive ESC\[0m B knows Nacre-A\./,
+      )
+      expect(Bun.stripANSI(output)).not.toContain(`→ ${humanAddress}`)
+
+      const emptyHumanDelivery = await fetch(humanAddress, {
+        method: "POST",
+        headers: { "x-hummingbirds-request-id": "q-empty-human" },
+        body: " \n",
+      })
+      expect([emptyHumanDelivery.status, await emptyHumanDelivery.text()]).toEqual([
+        400,
+        "Empty message.",
+      ])
+      expect(
+        (await events(bird)).some(
+          (event) => event.kind === "delivered" && event.requestId === "q-empty-human",
+        ),
+      ).toBe(false)
     } finally {
       if (child.exitCode === null) child.kill()
       await child.exited
@@ -265,9 +345,9 @@ describe("Hummingbirds", () => {
           (event) => event.kind === "completed" && event.inReplyTo === "q-train",
         )
       })
-      const trainingReply = (await events(a)).find(
-        (event) => event.kind === "received" && event.inReplyTo === "q-train",
-      )
+      const trainingReply = (await events(a))
+        .filter((event) => event.kind === "received")
+        .find((event) => event.inReplyTo === "q-train")
       expect(trainingReply?.question).toBe(`Amber Tern-417.\n\nContributors: c at ${c.url}`)
       expect(received(await events(a), "q-train")).toEqual([
         ["human", null, null, []],
@@ -292,9 +372,9 @@ describe("Hummingbirds", () => {
           (event) => event.kind === "completed" && event.inReplyTo === "q-probe",
         )
       })
-      const probeReply = (await events(a)).find(
-        (event) => event.kind === "received" && event.inReplyTo === "q-probe",
-      )
+      const probeReply = (await events(a))
+        .filter((event) => event.kind === "received")
+        .find((event) => event.inReplyTo === "q-probe")
       expect(probeReply?.question).toBe(`Violet Shoal-862.\n\nContributors: c at ${c.url}`)
       expect(received(await events(a), "q-probe")).toEqual([
         ["human", null, null, []],
@@ -332,6 +412,14 @@ describe("Hummingbirds", () => {
       expect([cycle.status, await cycle.text()]).toEqual([409, "Cycle rejected at solo."])
       const empty = await send(bird, " \n", "q-empty", inbox.url)
       expect([empty.status, await empty.text()]).toEqual([400, "Empty message."])
+      const invalidRoute = await fetch(new URL("/unknown", bird.url), {
+        method: "POST",
+        body: "Not a message endpoint.",
+      })
+      expect([invalidRoute.status, await invalidRoute.text()]).toEqual([
+        404,
+        "POST a plain-text message to /ask",
+      ])
       expect((await send(bird, "just a command", "q-command")).status).toBe(202)
 
       await waitUntil(async () => {
@@ -351,7 +439,13 @@ describe("Hummingbirds", () => {
       expect(turns.filter((event) => event.kind === "started").map((event) => event.requestId)).toEqual(
         admitted,
       )
-      expect(inbox.messages).toHaveLength(5)
+      expect(inbox.messages).toEqual(
+        questions.map((question, index) => ({
+          body: `Handled by solo: ${question}`,
+          from: "solo",
+          inReplyTo: `request-${index}`,
+        })),
+      )
       await stopBird(bird)
       expect(await readRemainingOutput(bird.process.stdout)).toContain(
         "Handled by solo: just a command",
@@ -493,7 +587,7 @@ function startInbox(): { messages: Message[]; stop: () => void; url: string } {
   return {
     messages,
     stop: () => void server.stop(true),
-    url: `http://127.0.0.1:${server.port}/inbox`,
+    url: `http://127.0.0.1:${server.port}/ask`,
   }
 }
 
@@ -513,7 +607,7 @@ async function send(
   })
 }
 
-async function events(bird: Bird): Promise<Event[]> {
+async function events(bird: Pick<Bird, "directory">): Promise<Event[]> {
   const file = Bun.file(join(bird.directory, "bird", "events.jsonl"))
   if (!(await file.exists())) return []
   return (await file.text())

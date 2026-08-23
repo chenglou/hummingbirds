@@ -30,20 +30,16 @@ type Context = {
   requestId: string
 }
 
-type Event = Context & {
-  at: number
-  kind: "received" | "rejected" | "started" | "completed" | "failed"
-  question?: string
-  threadId?: string | null
-  codexPid?: number
-  error?: string
-}
+type Event =
+  | { kind: "received" | "delivered"; question: string }
+  | { kind: "rejected" | "failed"; error: string }
+  | { kind: "started"; codexPid: number; threadId: string | null }
+  | { kind: "completed"; threadId: string }
 
-type CodexEvent = {
-  type?: string
-  thread_id?: string
-  item?: { type?: string; text?: string; command?: string }
-}
+type CodexEvent =
+  | { kind: "thread"; threadId: string }
+  | { kind: "outgoing"; command: string }
+  | { kind: "message"; text: string }
 
 const directory = resolve(Bun.env["HUMMINGBIRDS_DIRECTORY"] ?? "bird")
 const nodeId = Bun.env["HUMMINGBIRDS_NODE_ID"] ?? basename(directory)
@@ -61,14 +57,14 @@ const threadIdPath = join(directory, "thread-id")
 const eventsPath = join(directory, "events.jsonl")
 const interactive = process.stdout.isTTY === true
 let queue: Promise<unknown> = Promise.resolve()
-let terminal: Interface | null = null
+let terminal: { address: string; input: Interface } | null = null
 
 mkdirSync(workspace, { recursive: true })
 
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: Number(Bun.env["HUMMINGBIRDS_PORT"] ?? 3000),
-  fetch: handleRequest,
+  fetch: (request) => handleRequest(request, "bird"),
 })
 const address = `http://127.0.0.1:${server.port}/ask`
 const agentsPath = join(workspace, "AGENTS.md")
@@ -87,11 +83,17 @@ console.log(JSON.stringify({ id: nodeId, pid: process.pid, url: address }))
 if (process.stdin.isTTY === true) void readTerminal().catch(console.error)
 
 async function readTerminal(): Promise<void> {
+  const inbox = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request) => handleRequest(request, "human"),
+  })
+  const humanAddress = `http://127.0.0.1:${inbox.port}/ask`
   const background = 101 + Number(Bun.hash.wyhash("human") % 6n)
   const prompt = `\x1b[30;${background}m You \x1b[0m `
   const input = createInterface({ input: process.stdin, output: process.stdout, prompt, terminal: interactive })
   if (interactive) {
-    terminal = input
+    terminal = { address: humanAddress, input }
     input.on("SIGINT", () => {
       input.close()
       process.kill(process.pid, "SIGINT")
@@ -100,11 +102,19 @@ async function readTerminal(): Promise<void> {
   }
   for await (const line of input) {
     if (line.trim() !== "") {
-      await handleRequest(new Request(address, { method: "POST", body: line }))
+      await fetch(address, {
+        method: "POST",
+        headers: {
+          [headers.callerId]: "human",
+          [headers.replyTo]: humanAddress,
+        },
+        body: line,
+      })
     }
     if (interactive) renderTerminal("")
   }
-  if (terminal === input) terminal = null
+  terminal = null
+  await inbox.stop()
 }
 
 function renderTerminal(text: string): void {
@@ -113,32 +123,42 @@ function renderTerminal(text: string): void {
     return
   }
   process.stdout.write(`\r\x1b[2K${text}`)
-  terminal.prompt(true)
-  process.stdout.write(terminal.line)
+  terminal.input.prompt(true)
+  process.stdout.write(terminal.input.line)
 }
 
-async function handleRequest(request: Request): Promise<Response> {
+async function handleRequest(request: Request, recipient: "bird" | "human"): Promise<Response> {
   if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
     return new Response("POST a plain-text message to /ask", { status: 404 })
   }
-  const path = parsePath(request.headers.get(headers.path))
   const inReplyTo = request.headers.get(headers.inReplyTo)
+  const invocationId = request.headers.get(headers.invocationId) ?? crypto.randomUUID()
+  const requestId = request.headers.get(headers.requestId) ?? inReplyTo ?? crypto.randomUUID()
+  const path = parsePath(request.headers.get(headers.path))
+  if (path === null) {
+    return reply(400, `${headers.path} must be a JSON array of node IDs`, {
+      invocationId,
+      requestId,
+    })
+  }
   const context: Context = {
     callerId: request.headers.get(headers.callerId) ?? "human",
     inReplyTo,
-    invocationId: request.headers.get(headers.invocationId) ?? crypto.randomUUID(),
+    invocationId,
     parentInvocationId: request.headers.get(headers.parentInvocationId),
-    path: path ?? [],
+    path,
     replyTo: request.headers.get(headers.replyTo),
-    requestId: request.headers.get(headers.requestId) ?? inReplyTo ?? crypto.randomUUID(),
+    requestId,
   }
-  if (path === null) return reply(400, `${headers.path} must be a JSON array of node IDs`, context)
   const question = await request.text()
-  record(context, "received", { question })
-
+  if (recipient === "bird") record(context, { kind: "received", question })
   // Usually a reply whose body never made it into curl; better to hear about it now.
   if (question.trim() === "") return reject(400, "Empty message.", context)
-  // A message with no Reply-to is fine: a command, or a human who will read the log.
+  if (recipient === "human") {
+    record(context, { kind: "delivered", question })
+    return reply(202, "Accepted by human.", context)
+  }
+  // A message with no Reply-to is fine: it may just share a fact or request an action.
   // A question that already went through this bird is a cycle; nothing else would
   // stop it going round forever. A reply is not a question, so its path is fine.
   if (inReplyTo === null && context.path.includes(nodeId)) {
@@ -155,21 +175,21 @@ async function runTurn(question: string, context: Context): Promise<void> {
   queue = turn.catch(() => {})
   try {
     const threadId = await turn
-    record(context, "completed", { threadId })
+    record(context, { kind: "completed", threadId })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     // Nobody saw the turn fail, so tell the asker the same way the bird itself would
     // have, then put it on record. A failed reply turn owes nobody anything, and not
     // reporting it is what keeps two failing birds from bouncing reports forever.
     if (context.inReplyTo === null && context.replyTo !== null) {
-      await reportFailure(message, context)
+      await reportFailure(context.replyTo, message, context)
     }
-    record(context, "failed", { error: message })
+    record(context, { kind: "failed", error: message })
   }
 }
 
-async function reportFailure(message: string, context: Context): Promise<void> {
-  await fetch(context.replyTo ?? "", {
+async function reportFailure(replyTo: string, message: string, context: Context): Promise<void> {
+  await fetch(replyTo, {
     method: "POST",
     headers: {
       "content-type": "text/plain; charset=utf-8",
@@ -222,12 +242,11 @@ async function ask(question: string, context: Context): Promise<string> {
     },
     stdin: new Blob([envelope(question, context)]),
     stdout: "pipe",
-    stderr: "pipe",
+    stderr: "ignore",
   })
-  record(context, "started", { codexPid: child.pid, threadId })
-  const [startedThreadId, , exitCode] = await Promise.all([
+  record(context, { kind: "started", codexPid: child.pid, threadId })
+  const [startedThreadId, exitCode] = await Promise.all([
     readCodexOutput(child.stdout, context),
-    new Response(child.stderr).text(),
     child.exited,
   ])
 
@@ -257,26 +276,23 @@ async function readCodexOutput(
     let display = ""
     for (const line of lines) {
       const event = parseEvent(line)
-      if (event?.type === "thread.started") startedThreadId = event.thread_id ?? null
+      if (event?.kind === "thread") startedThreadId = event.threadId
       if (!interactive) continue
       display += `\x1b[90m${line}\x1b[0m\n`
-      if (
-        event?.type === "item.started" &&
-        event.item?.type === "command_execution" &&
-        event.item.command !== undefined
-      ) {
-        const outgoing = outgoingMessage(event.item.command, context)
-        if (outgoing !== null) {
-          display += formatMessage(`→ ${outgoing.recipient}`, outgoing.message)
+      if (event === null) continue
+      switch (event.kind) {
+        case "thread":
+          break
+        case "outgoing": {
+          const outgoing = outgoingMessage(event.command, context)
+          if (outgoing !== null && (terminal === null || outgoing.address !== terminal.address)) {
+            display += formatMessage(`→ ${outgoing.recipient}`, outgoing.message)
+          }
+          break
         }
-      }
-      if (
-        event?.type === "item.completed" &&
-        event.item?.type === "agent_message" &&
-        event.item.text !== undefined &&
-        event.item.text !== ""
-      ) {
-        display += formatMessage(`${nodeId} (self)`, event.item.text, nodeId)
+        case "message":
+          if (event.text !== "") display += formatMessage(`${nodeId}:`, event.text)
+          break
       }
     }
     if (interactive) renderTerminal(display)
@@ -298,7 +314,7 @@ async function readCodexOutput(
 function outgoingMessage(
   command: string,
   context: Context,
-): { recipient: string; message: string } | null {
+): { address: string; recipient: string; message: string } | null {
   let words = shellWords(command)
   const script = words.find((word) => /(?:^|\s)(?:\S+\/)?curl\s/.test(word))
   if (script !== undefined) words = shellWords(script)
@@ -317,12 +333,12 @@ function outgoingMessage(
   const message = separator < 0 ? words[data + 1] : option.slice(separator + 1)
   if (message === undefined) return null
 
-  if (context.replyTo === target) return { recipient: context.callerId, message }
+  if (context.replyTo === target) return { address: target, recipient: context.callerId, message }
   const configuredPeers = Bun.env["HUMMINGBIRDS_PEERS"] ?? readFileSync(agentsPath, "utf8")
   for (const match of configuredPeers.matchAll(/^\s*-\s+(\S+)\s+at\s+(\S+)/gm)) {
-    if (match[2] === target) return { recipient: match[1] ?? target, message }
+    if (match[2] === target) return { address: target, recipient: match[1] ?? target, message }
   }
-  return { recipient: target, message }
+  return { address: target, recipient: target, message }
 }
 
 function shellWords(command: string): string[] {
@@ -337,9 +353,13 @@ function shellWords(command: string): string[] {
     } else if (quote === null && (character === "'" || character === '"')) {
       quote = character
     } else if (character === "\\" && quote !== "'") {
-      index += 1
-      const escaped = command.charAt(index)
-      if (escaped !== "\n") word += escaped
+      const escaped = command.charAt(index + 1)
+      if (quote === '"' && !"$`\"\\\n".includes(escaped)) {
+        word += character
+      } else {
+        index += 1
+        if (escaped !== "\n") word += escaped
+      }
     } else if (quote === null && /\s/.test(character)) {
       if (word !== "") words.push(word)
       word = ""
@@ -370,34 +390,50 @@ function envelope(question: string, context: Context): string {
   return `${lines.join("\n")}\n\n${question}`
 }
 
-function record(context: Context, kind: Event["kind"], extra: Partial<Event> = {}): void {
-  const event: Event = { ...context, ...extra, at: Date.now(), kind }
-  const line = `${JSON.stringify(event)}\n`
+function record(context: Context, event: Event): void {
+  const { kind, ...details } = event
+  const line = `${JSON.stringify({ ...context, ...details, at: Date.now(), kind })}\n`
   appendFileSync(eventsPath, line)
   if (!interactive) {
     process.stdout.write(line)
     return
   }
   let display = `\x1b[90m${line.slice(0, -1)}\x1b[0m\n`
-  if (kind === "received" && context.callerId !== "human") {
-    display += formatMessage(`← ${context.callerId}`, extra.question ?? "")
+  switch (event.kind) {
+    case "received":
+      if (context.callerId !== "human") {
+        display += formatMessage(`← ${context.callerId}`, event.question)
+      }
+      break
+    case "delivered":
+      display += formatMessage(context.callerId, event.question, context.callerId)
+      break
+    case "rejected":
+    case "started":
+    case "completed":
+    case "failed":
+      break
   }
   renderTerminal(display)
 }
 
 function formatMessage(label: string, text: string, sender?: string): string {
   const message = Bun.stripANSI(text).replaceAll("\n", "\n    ")
-  if (sender === undefined) return `${Bun.stripANSI(label)}  ${message}\n`
+  if (sender === undefined) return `${Bun.stripANSI(label)}${label.endsWith(":") ? " " : "  "}${message}\n`
   const background = 101 + Number(Bun.hash.wyhash(sender) % 6n)
   return `\x1b[30;${background}m ${Bun.stripANSI(label)} \x1b[0m ${message}\n`
 }
 
 function reject(status: number, body: string, context: Context): Response {
-  record(context, "rejected", { error: body })
+  record(context, { kind: "rejected", error: body })
   return reply(status, body, context)
 }
 
-function reply(status: number, body: string, context: Context): Response {
+function reply(
+  status: number,
+  body: string,
+  context: Pick<Context, "invocationId" | "requestId">,
+): Response {
   return new Response(body, {
     status,
     headers: {
@@ -423,7 +459,27 @@ function parsePath(raw: string | null): string[] | null {
 function parseEvent(line: string): CodexEvent | null {
   if (!line.startsWith("{")) return null
   try {
-    return JSON.parse(line) as CodexEvent
+    const event: unknown = JSON.parse(line)
+    if (typeof event !== "object" || event === null || !("type" in event)) return null
+    switch (event.type) {
+      case "thread.started":
+        if (!("thread_id" in event) || typeof event.thread_id !== "string") return null
+        return { kind: "thread", threadId: event.thread_id }
+      case "item.started":
+      case "item.completed": {
+        if (!("item" in event) || typeof event.item !== "object" || event.item === null) return null
+        const item = event.item
+        if (!("type" in item)) return null
+        if (event.type === "item.started") {
+          if (item.type !== "command_execution" || !("command" in item)) return null
+          return typeof item.command === "string" ? { kind: "outgoing", command: item.command } : null
+        }
+        if (item.type !== "agent_message" || !("text" in item)) return null
+        return typeof item.text === "string" ? { kind: "message", text: item.text } : null
+      }
+      default:
+        return null
+    }
   } catch {
     return null
   }

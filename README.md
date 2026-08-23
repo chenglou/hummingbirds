@@ -10,7 +10,7 @@ codex login
 bun start
 ```
 
-In an interactive terminal, type messages directly. `bun start` prints every raw bird and Codex event as it arrives; without an interactive terminal, the same command runs the HTTP server for deployment.
+In an interactive terminal, type messages directly. Replies arrive at your local human inbox just like messages between birds. `bun start` prints every raw bird and Codex event as it arrives; without an interactive terminal, the same command runs the HTTP server for deployment.
 
 You can also send a message with curl:
 

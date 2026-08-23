@@ -82,7 +82,8 @@ emit({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })
 // POST like the prompt tells a bird to: a question when inReplyTo is null, a reply
 // otherwise. Either way the other side only acknowledges.
 async function post(address: string, body: string, inReplyTo: string | null): Promise<void> {
-  const command = `/bin/zsh -lc "curl -sS -X POST '${address}' --data-binary '${body.replaceAll("'", "'\\''")}'"`
+  const script = `curl -sS -X POST ${shellQuote(address)} --data-binary ${shellQuote(body)}`
+  const command = `/bin/zsh -lc ${shellQuote(script)}`
   const item = {
     id: `item_${nextItemId++}`,
     type: "command_execution",
@@ -114,6 +115,10 @@ async function post(address: string, body: string, inReplyTo: string | null): Pr
   if (response.status !== 202) {
     throw new Error(`${address} returned ${response.status} instead of 202: ${text}`)
   }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
 }
 
 function emit(event: object): void {
