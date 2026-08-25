@@ -57,6 +57,8 @@ curl localhost:3001/ask -d "Ask your peers what Ben likes."
 
 Birds send plain-text messages to one another and return immediately. Replies arrive later as new messages. There is no flock manager; the models decide what to ask, remember, and pass along.
 
+A bird can also hatch another independent bird through its own local `/hatch` endpoint. Each child has its own ignored `bird-<id>/` directory, starts with a fresh conversation, and learns through ordinary messages. `HUMMINGBIRDS_HATCH_MAX_BIRDS` limits each local flock to 32 children by default.
+
 The runtime is [src/server.ts](src/server.ts); its instructions come from [src/prompt_template.md](src/prompt_template.md). Resuming a bird also requires the same Codex home, which stores the conversation.
 
 Open directions are in [experiments/ideas.md](experiments/ideas.md). Run `bun run check` and `bun run knip` for deterministic verification.

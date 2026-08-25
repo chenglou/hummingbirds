@@ -71,7 +71,10 @@ if (inReplyTo !== undefined) {
 }
 
 await mkdir(".fake-codex", { recursive: true })
-await writeFile(sessionPath(session.threadId), `${JSON.stringify(session, null, 2)}\n`)
+await writeFile(
+  sessionPath(session.threadId),
+  `${JSON.stringify({ ...session, lastEnvelope: envelope }, null, 2)}\n`,
+)
 await appendFile(join(".fake-codex", "argv.jsonl"), `${JSON.stringify(process.argv.slice(2))}\n`)
 emit({
   item: { id: `item_${nextItemId}`, text: answer, type: "agent_message" },
@@ -103,7 +106,12 @@ async function post(address: string, body: string, inReplyTo: string | null): Pr
       "x-hummingbirds-path": Bun.env["HUMMINGBIRDS_PATH"] ?? "[]",
       "x-hummingbirds-reply-to": nodeAddress,
       "x-hummingbirds-request-id": Bun.env["HUMMINGBIRDS_REQUEST_ID"] ?? "",
-      ...(inReplyTo === null ? {} : { "x-hummingbirds-in-reply-to": inReplyTo }),
+      ...(inReplyTo === null
+        ? {}
+        : {
+            "x-hummingbirds-in-reply-to":
+              Bun.env["HUMMINGBIRDS_REQUEST_ID"] ?? inReplyTo,
+          }),
     },
     body,
   })

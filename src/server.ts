@@ -5,9 +5,17 @@
 //   workspace/    Codex's working directory, where AGENTS.md tells the bird who it is
 // Nobody waits on the line: a message is acknowledged at once, the turn runs in its
 // own time, and the bird POSTs whatever it has to say to the message's Reply-to address.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmdirSync,
+  writeFileSync,
+} from "fs"
 import { rename } from "fs/promises"
-import { basename, join, resolve } from "path"
+import { basename, dirname, join, resolve } from "path"
 import { createInterface, type Interface } from "readline"
 
 const headers = {
@@ -44,6 +52,10 @@ type CodexEvent =
 const directory = resolve(Bun.env["HUMMINGBIRDS_DIRECTORY"] ?? "bird")
 const nodeId = Bun.env["HUMMINGBIRDS_NODE_ID"] ?? basename(directory)
 const codex = Bun.env["HUMMINGBIRDS_CODEX"] ?? "codex"
+const hatchMaxBirds = Number(Bun.env["HUMMINGBIRDS_HATCH_MAX_BIRDS"] ?? 32)
+if (!Number.isSafeInteger(hatchMaxBirds) || hatchMaxBirds < 1) {
+  throw new Error("HUMMINGBIRDS_HATCH_MAX_BIRDS must be a positive integer")
+}
 // Extra flags for the Codex turn, for example `-m model` or `-c key=value`, split on
 // whitespace (no shell quoting: a literal space always splits). They go after the
 // subcommand because `codex` silently drops root-level `-c` overrides, so they must be
@@ -64,7 +76,8 @@ mkdirSync(workspace, { recursive: true })
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: Number(Bun.env["HUMMINGBIRDS_PORT"] ?? 3000),
-  fetch: (request) => handleRequest(request, "bird"),
+  fetch: (request) =>
+    new URL(request.url).pathname === "/hatch" ? hatch(request) : handleRequest(request, "bird"),
 })
 const address = `http://127.0.0.1:${server.port}/ask`
 const agentsPath = join(workspace, "AGENTS.md")
@@ -81,6 +94,71 @@ if (!existsSync(agentsPath)) {
 }
 console.log(JSON.stringify({ id: nodeId, pid: process.pid, url: address }))
 if (process.stdin.isTTY === true) void readTerminal().catch(console.error)
+
+async function hatch(request: Request): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("POST a plain-text bird ID to /hatch", { status: 405 })
+  }
+  const id = (await request.text()).trim()
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) {
+    return new Response("Bird ID must contain only letters, numbers, underscores, or hyphens.", {
+      status: 400,
+    })
+  }
+  const flockDirectory = dirname(directory)
+  const childDirectory = join(flockDirectory, `bird-${id}`)
+  // Reserve before counting so concurrent birds cannot both keep the last slot.
+  try {
+    mkdirSync(childDirectory)
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "EEXIST") {
+      return new Response("Bird ID already exists.", { status: 409 })
+    }
+    throw error
+  }
+  const births = readdirSync(flockDirectory, { withFileTypes: true }).filter(
+    (entry) => entry.isDirectory() && entry.name.startsWith("bird-"),
+  ).length
+  if (births > hatchMaxBirds) {
+    rmdirSync(childDirectory)
+    return new Response("Local bird limit reached.", { status: 429 })
+  }
+
+  const outputPath = join(childDirectory, "stdout.jsonl")
+  const child = Bun.spawn([process.execPath, import.meta.path], {
+    cwd: process.cwd(),
+    detached: true,
+    env: {
+      ...process.env,
+      HUMMINGBIRDS_DIRECTORY: childDirectory,
+      HUMMINGBIRDS_NODE_ID: id,
+      HUMMINGBIRDS_PEERS: `- ${nodeId} at ${address}`,
+      HUMMINGBIRDS_PORT: "0",
+      HUMMINGBIRDS_SEED: "(none)",
+    },
+    stdin: "ignore",
+    stdout: Bun.file(outputPath),
+    stderr: "ignore",
+  })
+  child.unref()
+
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (existsSync(outputPath)) {
+      const text = readFileSync(outputPath, "utf8")
+      const newline = text.indexOf("\n")
+      if (newline >= 0) {
+        const started = JSON.parse(text.slice(0, newline)) as { id: string; url: string }
+        return new Response(`Started ${started.id} at ${started.url}.`, { status: 201 })
+      }
+    }
+    if (child.exitCode !== null) {
+      return new Response("Bird exited before starting.", { status: 500 })
+    }
+    await Bun.sleep(10)
+  }
+  child.kill()
+  return new Response("Bird did not start in time.", { status: 500 })
+}
 
 async function readTerminal(): Promise<void> {
   const inbox = Bun.serve({
@@ -382,9 +460,11 @@ function outgoingPath(context: Context): string[] {
 // What Codex reads: who sent the message, which request it belongs to, where the
 // answer should go, then the message itself.
 function envelope(question: string, context: Context): string {
+  // Caller-chosen IDs are metadata; never let them become instructions to the bird.
+  const identifier = Bun.hash.wyhash(context.inReplyTo ?? context.requestId).toString(16)
   const lines = [
     `From: ${context.callerId}`,
-    context.inReplyTo === null ? `Request: ${context.requestId}` : `Re: ${context.inReplyTo}`,
+    context.inReplyTo === null ? `Request: ${identifier}` : `Re: ${identifier}`,
   ]
   if (context.replyTo !== null) lines.push(`Reply-to: ${context.replyTo}`)
   return `${lines.join("\n")}\n\n${question}`

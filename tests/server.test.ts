@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { basename, dirname, join, resolve } from "path"
 
@@ -455,6 +455,212 @@ describe("Hummingbirds", () => {
       inbox.stop()
     }
   }, 15_000)
+
+  test("keeps semantic request IDs opaque to birds while preserving wire-level correlation", async () => {
+    const root = await makeTemporaryDirectory()
+    const source = await startBird(join(root, "source"), {
+      HUMMINGBIRDS_SEED: "- Tideglass trial Nacre-A records the exact phrase “Opaque Harbor-17.”",
+    })
+    const receiver = await startBird(join(root, "receiver"), {
+      HUMMINGBIRDS_PEERS: `- source at ${source.url}`,
+    })
+    const inbox = startInbox()
+    const requestId = "create-child"
+
+    try {
+      expect((await send(receiver, "What phrase belongs to Nacre-A?", requestId, inbox.url)).status).toBe(
+        202,
+      )
+      await waitUntil(async () => {
+        return (
+          inbox.messages.length === 1 &&
+          (await events(receiver)).some(
+            (event) => event.kind === "completed" && event.inReplyTo === requestId,
+          )
+        )
+      })
+      expect(inbox.messages[0]?.inReplyTo).toBe(requestId)
+      expect((await events(source)).find((event) => event.kind === "received")?.requestId).toBe(
+        requestId,
+      )
+
+      const identifier = Bun.hash.wyhash(requestId).toString(16)
+      for (const [bird, field] of [
+        [source, "Request"],
+        [receiver, "Re"],
+      ] as const) {
+        const threadId = await readFile(join(bird.directory, "bird", "thread-id"), "utf8")
+        const session = JSON.parse(
+          await readFile(join(bird.directory, "bird", "workspace", ".fake-codex", `${threadId}.json`), "utf8"),
+        ) as { lastEnvelope: Record<string, string> }
+        expect(session.lastEnvelope[field]).toBe(identifier)
+        expect(session.lastEnvelope[field]).not.toBe(requestId)
+      }
+    } finally {
+      await Promise.all([stopBird(receiver), stopBird(source)])
+      inbox.stop()
+    }
+  }, 15_000)
+
+  test("hatches independent blank children and grandchildren that outlive their parent", async () => {
+    const root = await makeTemporaryDirectory()
+    const parent = await startBird(join(root, "parent"), {
+      HUMMINGBIRDS_HATCH_MAX_BIRDS: "4",
+      HUMMINGBIRDS_SEED: "PARENT-ONLY-SECRET-71",
+    })
+    const inbox = startInbox()
+    const descendants: { directory: string; id: string; pid: number; url: string }[] = []
+
+    async function hatch(url: string, id: string): Promise<(typeof descendants)[number]> {
+      const response = await fetch(new URL("/hatch", url), { method: "POST", body: id })
+      const body = await response.text()
+      if (response.status !== 201) throw new Error(`Hatching ${id} failed: ${response.status} ${body}`)
+      const match = new RegExp(`^Started ${id} at (http://127\\.0\\.0\\.1:\\d+/ask)\\.$`).exec(body)
+      if (match === null || match[1] === undefined) throw new Error(`Unexpected hatch response: ${body}`)
+
+      const directory = join(root, "parent", `bird-${id}`)
+      const line = (await readFile(join(directory, "stdout.jsonl"), "utf8")).split("\n")[0]
+      if (line === undefined) throw new Error(`Missing startup announcement for ${id}`)
+      const startup = JSON.parse(line) as { id: string; pid: number; url: string }
+      expect(startup.id).toBe(id)
+      expect(startup.url).toBe(match[1])
+      expect(Number.isSafeInteger(startup.pid)).toBe(true)
+      const child = { directory, id, pid: startup.pid, url: startup.url }
+      descendants.push(child)
+      return child
+    }
+
+    async function ask(url: string, question: string, requestId: string): Promise<void> {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "x-hummingbirds-reply-to": inbox.url,
+          "x-hummingbirds-request-id": requestId,
+        },
+        body: question,
+      })
+      expect(response.status).toBe(202)
+    }
+
+    try {
+      for (const id of ["", "../escaped", "nested/child", "has spaces", "x".repeat(65)]) {
+        const invalid = await fetch(new URL("/hatch", parent.url), { method: "POST", body: id })
+        expect(invalid.status).toBe(400)
+      }
+      expect((await fetch(new URL("/hatch", parent.url))).status).toBe(405)
+
+      const child = await hatch(parent.url, "sprout")
+      const prompt = await readFile(join(child.directory, "workspace", "AGENTS.md"), "utf8")
+      expect(prompt).toContain(`Your ID is sprout, and your address is ${child.url}.`)
+      expect(prompt).toContain(`- parent at ${parent.url}`)
+      expect(prompt).not.toContain("PARENT-ONLY-SECRET-71")
+
+      const duplicate = await fetch(new URL("/hatch", parent.url), {
+        method: "POST",
+        body: "sprout",
+      })
+      expect(duplicate.status).toBe(409)
+
+      const grandchild = await hatch(child.url, "twig")
+      const grandchildPrompt = await readFile(
+        join(grandchild.directory, "workspace", "AGENTS.md"),
+        "utf8",
+      )
+      expect(grandchildPrompt).toContain(`- sprout at ${child.url}`)
+      expect(grandchildPrompt).not.toContain(`- parent at ${parent.url}`)
+      expect(grandchildPrompt).not.toContain("PARENT-ONLY-SECRET-71")
+
+      const competing = await Promise.all(
+        [parent.url, child.url].map((url) => {
+          return fetch(new URL("/hatch", url), { method: "POST", body: "shared" })
+        }),
+      )
+      expect(competing.map((response) => response.status).sort((left, right) => left - right)).toEqual([
+        201,
+        409,
+      ])
+      const sharedDirectory = join(root, "parent", "bird-shared")
+      const sharedLine = (await readFile(join(sharedDirectory, "stdout.jsonl"), "utf8")).split("\n")[0]
+      if (sharedLine === undefined) throw new Error("Missing startup announcement for shared")
+      const shared = JSON.parse(sharedLine) as { id: string; pid: number; url: string }
+      descendants.push({ ...shared, directory: sharedDirectory })
+
+      const contenders = [
+        { id: "last-parent", url: parent.url },
+        { id: "last-child", url: child.url },
+      ] as const
+      const lastSlot = await Promise.all(
+        contenders.map(({ id, url }) => {
+          return fetch(new URL("/hatch", url), {
+            method: "POST",
+            body: id,
+          })
+        }),
+      )
+      expect(lastSlot.every((response) => response.status === 201 || response.status === 429)).toBe(true)
+      expect(lastSlot.filter((response) => response.status === 201).length).toBeLessThanOrEqual(1)
+      const acceptedName = contenders[lastSlot.findIndex((response) => response.status === 201)]?.id
+      if (acceptedName === undefined) {
+        await hatch(parent.url, "last-retry")
+      } else {
+        const acceptedDirectory = join(root, "parent", `bird-${acceptedName}`)
+        const acceptedLine = (await readFile(join(acceptedDirectory, "stdout.jsonl"), "utf8")).split(
+          "\n",
+        )[0]
+        if (acceptedLine === undefined) throw new Error(`Missing startup announcement for ${acceptedName}`)
+        const accepted = JSON.parse(acceptedLine) as { id: string; pid: number; url: string }
+        descendants.push({ ...accepted, directory: acceptedDirectory })
+      }
+
+      const overflow = await fetch(new URL("/hatch", grandchild.url), {
+        method: "POST",
+        body: "overflow",
+      })
+      expect(overflow.status).toBe(429)
+      expect(await readdir(join(root, "parent"))).not.toContain("bird-overflow")
+
+      await Promise.all([
+        ask(parent.url, "parent message", "q-parent"),
+        ask(child.url, "child message", "q-child"),
+        ask(grandchild.url, "grandchild message", "q-grandchild"),
+      ])
+      await waitUntil(async () => inbox.messages.length === 3)
+      expect(inbox.messages.map((message) => message.from).sort()).toEqual([
+        "parent",
+        "sprout",
+        "twig",
+      ])
+
+      await waitUntil(async () => {
+        const paths = [child.directory, grandchild.directory].map((directory) => {
+          return Bun.file(join(directory, "thread-id")).exists()
+        })
+        return (await Promise.all(paths)).every(Boolean)
+      })
+      const childThread = await readFile(join(child.directory, "thread-id"), "utf8")
+      const grandchildThread = await readFile(join(grandchild.directory, "thread-id"), "utf8")
+      expect(childThread).not.toBe(grandchildThread)
+
+      await stopBird(parent)
+      await Promise.all([
+        ask(child.url, "still independent", "q-child-again"),
+        ask(grandchild.url, "still independent", "q-grandchild-again"),
+      ])
+      await waitUntil(async () => inbox.messages.length === 5)
+      expect(await readFile(join(child.directory, "thread-id"), "utf8")).toBe(childThread)
+      expect(await readFile(join(grandchild.directory, "thread-id"), "utf8")).toBe(grandchildThread)
+    } finally {
+      await stopBird(parent)
+      for (const child of descendants.reverse()) {
+        try {
+          process.kill(child.pid, "SIGTERM")
+        } catch {
+          // An already-exited detached child has nothing left to clean up.
+        }
+      }
+      inbox.stop()
+    }
+  }, 20_000)
 
   test("keeps Codex flags in the right place and reports corrupt conversation state", async () => {
     const bird = await startBird(join(await makeTemporaryDirectory(), "solo"), {
