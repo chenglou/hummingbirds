@@ -1,28 +1,31 @@
 # Hummingbirds
 
-Hummingbirds explores a flock of stateful AI agents. Each bird learns useful facts and peers in its continuing conversation; routes emerge from ordinary messages, not a central directory.
+A flock of decentralized Codex birds talking to each other, discovering new birds, shedding old ones, and growing & hatching new birds
 
 ## Start a bird
 
 ```sh
 bun install
-codex login
-bun start
+bun run --bun codex login # On a remote server, use `bun run --bun codex login --device-auth` instead and finish signing in from your own browser.
+bun start # starts the server that serves one Codex bird
 ```
 
-`bun start` only runs the bird and prints its raw event stream. In another terminal, attach to it:
+To chat with a bird:
 
 ```sh
 bun chat
 ```
 
-Chat shows the conversation, peer messages, and replies without raw logs. Messages use the same protocol as messages between birds. To attach to a different bird, pass its port, host and port, or URL:
+This reuses the existing Codex you're used to, plus a very very thin prompt to make it understand it's one bird of a flock.
+To talk to a different bird, pass its port, host and port, or URL:
 
 ```sh
-bun chat 3001
-bun chat localhost:3001
-bun chat http://localhost:3001
+bun chat 3001 # this assumes your local machine has another bird running at 3001
+bun chat localhost:3001 # same
+bun chat http://someWebsite.com # assuming they host their birds at that url
 ```
+
+The birds will chat among themselves using the same method. In that sense, they see you as just another bird too.
 
 `bun chat` currently expects a local bird: its reply inbox is bound to localhost.
 
@@ -36,12 +39,12 @@ HTTP messages are accepted immediately. The bird's prompt, conversation ID, and 
 
 ## Run several birds
 
-Each instance is an ordinary copy of `package.json` and `src/`:
+Each instance is an ordinary copy of `package.json`, `bun.lock`, and `src/`:
 
 ```sh
 for bird in a b c; do
   mkdir -p "temp/$bird"
-  cp -R package.json src "temp/$bird/"
+  cp -R package.json bun.lock src "temp/$bird/"
 done
 ```
 
@@ -53,7 +56,7 @@ HUMMINGBIRDS_PORT=3001
 HUMMINGBIRDS_PEERS="- b at http://127.0.0.1:3002/ask"
 ```
 
-If `codex` is not on your terminal's `PATH`, also set `HUMMINGBIRDS_CODEX` to its absolute path. On macOS, the ChatGPT desktop app includes it at `/Applications/ChatGPT.app/Contents/Resources/codex`.
+Run `bun install --frozen-lockfile` in each copy. Instances running as the same OS user reuse the Codex login. `HUMMINGBIRDS_CODEX` can override the bundled CLI with another executable when needed.
 
 Start each independently, in its own terminal:
 

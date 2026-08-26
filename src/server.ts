@@ -42,7 +42,10 @@ type Event =
 
 const directory = resolve(Bun.env["HUMMINGBIRDS_DIRECTORY"] ?? "bird")
 const nodeId = Bun.env["HUMMINGBIRDS_NODE_ID"] ?? basename(directory)
-const codex = Bun.env["HUMMINGBIRDS_CODEX"] ?? "codex"
+const executable = Bun.env["HUMMINGBIRDS_CODEX"]
+const codex = executable === undefined
+  ? [process.execPath, require.resolve("@openai/codex/bin/codex.js")]
+  : [executable]
 const hatchMaxBirds = Number(Bun.env["HUMMINGBIRDS_HATCH_MAX_BIRDS"] ?? 32)
 if (!Number.isSafeInteger(hatchMaxBirds) || hatchMaxBirds < 1) {
   throw new Error("HUMMINGBIRDS_HATCH_MAX_BIRDS must be a positive integer")
@@ -283,7 +286,7 @@ async function ask(question: string, context: Context): Promise<string> {
     threadId === null
       ? ["--search", "exec", ...common, ...codexArgs, "-"]
       : ["--search", "exec", "resume", ...common, ...codexArgs, threadId, "-"]
-  const child = Bun.spawn([codex, ...args], {
+  const child = Bun.spawn([...codex, ...args], {
     cwd: workspace,
     env: {
       ...process.env,

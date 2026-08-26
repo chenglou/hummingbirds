@@ -853,6 +853,32 @@ describe("Hummingbirds", () => {
     }
   }, 20_000)
 
+  test("runs the packaged Codex without a globally installed Codex or Node", async () => {
+    const root = await makeTemporaryDirectory()
+    const emptyPath = join(root, "empty-path")
+    await mkdir(emptyPath)
+    const bird = await startBird(join(root, "packaged"), {
+      HUMMINGBIRDS_CODEX: undefined,
+      HUMMINGBIRDS_CODEX_ARGS: "--help",
+      PATH: emptyPath,
+    })
+
+    try {
+      expect((await send(bird, "Show the packaged CLI.", opaque("packaged-codex"))).status).toBe(202)
+      await waitUntil(async () => {
+        return (await events(bird)).some(
+          (event) => event.kind === "failed" && event.error === "Codex did not report a thread ID",
+        )
+      })
+      await stopBird(bird)
+      const output = await readRemainingOutput(bird.process.stdout)
+      expect(output).toContain("Usage: codex exec")
+      expect(output).toContain("Codex did not report a thread ID")
+    } finally {
+      await stopBird(bird)
+    }
+  }, 15_000)
+
   test("keeps Codex flags in the right place and reports corrupt conversation state", async () => {
     const bird = await startBird(join(await makeTemporaryDirectory(), "solo"), {
       HUMMINGBIRDS_CODEX_ARGS: " -m gpt-test  -c model_auto_compact_token_limit=20000 ",
@@ -934,7 +960,7 @@ describe("Hummingbirds", () => {
 
 async function startBird(
   directory: string,
-  environment: Record<string, string> = {},
+  environment: Record<string, string | undefined> = {},
   port = 0,
 ): Promise<Bird> {
   await mkdir(directory, { recursive: true })

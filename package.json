@@ -11,6 +11,9 @@
     "knip": "knip",
     "check": "tsc --noEmit && oxlint --type-aware src tests experiments && bun test"
   },
+  "dependencies": {
+    "@openai/codex": "0.149.1"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "@typescript/native": "npm:typescript@7.0.2",
