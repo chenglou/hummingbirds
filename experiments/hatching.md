@@ -40,12 +40,12 @@ created another bird, and propagated the same ID. A second descriptive request
 triggered a parallel branch. The isolated run grew to eight bird servers and
 seven active Codex turns before it was contained.
 
-Request IDs are now hashed only in the model-facing `Request:` and `Re:` lines;
-the original IDs remain unchanged in HTTP headers, logs, environment variables,
-and asynchronous correlation. Replaying the exact original `create-child` ID
-produced one intended child, zero unintended descendants, and correct
-independent recall. The local birth ceiling separately limits the consequences
-of any future model mistake.
+The current protocol rejects request IDs unless they are canonical UUIDs, so a
+descriptive value such as `create-child` cannot reach a model. Birds see the
+actual `x-request` or `x-in-reply-to` header, never both; `x-route` separately
+carries the current message path. This preserves asynchronous correlation
+without turning caller-controlled words into instructions. The local birth
+ceiling separately limits the consequences of any future model mistake.
 
 ## Specialization does not need a splitting rule
 
@@ -81,6 +81,40 @@ Knowledge transfer remained selective: descendants independently recalled the
 facts they were taught and correctly reported unknown when asked about withheld
 facts from their parent's conversation.
 
+## Organization needs truthful topology, not more rules
+
+A preceding investigation used a temporary hosting peer before `/hatch`
+existed. Its results here describe organizational behavior, not the current
+endpoint, and are separate from the 46-run totals above.
+
+A marginal-benefit instruction correctly suppressed an unnecessary split of one
+coherent specialty, but also suppressed a useful split of two distinct ones. The
+bird had mistaken two human caller identities for independently running peers.
+When an ordinary message explained that those identities shared one inbox and
+were not separate workers, the same policy handled both cases: zero unnecessary
+children for one specialty, and one useful specialist for two. Existing live
+specialists were reused when available; same-topic boundaries could instead
+follow distinct owners or audiences.
+
+Thus a caller name or reply address does not establish an independent execution
+lane. The experiment supplied its topology observation manually; the production
+runtime does not infer or inject it. Decisions about ownership, delegation, and
+splitting can remain conversational when their relevant facts are observable.
+
+## Attention policy matters more than prompt detail
+
+In another earlier matched workload, both prompts correctly avoided hatching.
+The concise prompt took **20 turns and 545,983 input tokens**; an overly
+prescriptive prompt took **116 turns and 4,959,125 input tokens** because
+broadcasts and acknowledgments activated other birds. Equal birth counts hid
+nearly six times as many turns and nine times as much context traffic.
+
+A separate ordinary operating message asked a bird to retain updates, forward
+only to peers with demonstrated interest, and avoid acknowledgment chatter.
+The same workload fell from **75 to 31 turns** and from **2,574,663 to 964,816
+input tokens**, including the instruction itself. No routing registry,
+subscription system, or specialized tool was required.
+
 ## Public research, original work, and real concurrency
 
 One blank child received a synthetic private planning label, used real web
@@ -102,7 +136,11 @@ conversation cannot.
 
 Files neither universally prevented nor caused specialization. One bird used
 local notes instead of creating a worker, while other birds wrote notes and
-still created coherent records specialists.
+still created coherent records specialists. An earlier optional context-only
+instruction produced a file-free specialist that passed all seven handoff and
+recall checks in 23 turns. This is cooperative behavior, not an enforced
+security boundary: another bird read a sibling experiment's fixture through
+shared `/private/tmp` despite having its own conversation and workspace.
 
 ## Twelve birds, then thirteen
 

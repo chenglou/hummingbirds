@@ -20,3 +20,9 @@ Keep only information worth remembering."
 Check whether birds can make consecutive useful `curl` calls without talking
 between them, while still sending additional messages or preserving important
 thoughts when appropriate. Measure the actual overhead before optimizing.
+
+## Broadcast information without broadcasting cognition
+
+Every delivered message currently starts a full model turn. Explore cheap
+delivery with selective activation through inboxes, batching, subscriptions,
+mentions, or pull—without spending a full turn just to decide what merits one.
