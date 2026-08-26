@@ -4,7 +4,7 @@
 //   events.jsonl  a log of every message, for inspection only
 //   workspace/    Codex's working directory, where AGENTS.md tells the bird who it is
 // Nobody waits on the line: a message is acknowledged at once, the turn runs in its
-// own time, and the bird POSTs whatever it has to say to the message's Reply-to address.
+// own time, and the bird POSTs whatever it has to say to the message's x-reply-to address.
 import {
   appendFileSync,
   existsSync,
@@ -16,38 +16,29 @@ import {
 } from "fs"
 import { rename } from "fs/promises"
 import { basename, dirname, join, resolve } from "path"
-import { createInterface, type Interface } from "readline"
 
 const headers = {
-  callerId: "x-hummingbirds-caller-id",
-  inReplyTo: "x-hummingbirds-in-reply-to",
-  invocationId: "x-hummingbirds-invocation-id",
-  parentInvocationId: "x-hummingbirds-parent-invocation-id",
-  path: "x-hummingbirds-path",
-  replyTo: "x-hummingbirds-reply-to",
-  requestId: "x-hummingbirds-request-id",
+  callerId: "x-from",
+  inReplyTo: "x-in-reply-to",
+  replyTo: "x-reply-to",
+  requestId: "x-request",
+  route: "x-route",
 } as const
 
 type Context = {
   callerId: string
   inReplyTo: string | null
   invocationId: string
-  parentInvocationId: string | null
   path: string[]
   replyTo: string | null
   requestId: string
 }
 
 type Event =
-  | { kind: "received" | "delivered"; question: string }
+  | { kind: "received"; question: string }
   | { kind: "rejected" | "failed"; error: string }
   | { kind: "started"; codexPid: number; threadId: string | null }
   | { kind: "completed"; threadId: string }
-
-type CodexEvent =
-  | { kind: "thread"; threadId: string }
-  | { kind: "outgoing"; command: string }
-  | { kind: "message"; text: string }
 
 const directory = resolve(Bun.env["HUMMINGBIRDS_DIRECTORY"] ?? "bird")
 const nodeId = Bun.env["HUMMINGBIRDS_NODE_ID"] ?? basename(directory)
@@ -67,17 +58,28 @@ const codexArgs = (Bun.env["HUMMINGBIRDS_CODEX_ARGS"] ?? "")
 const workspace = join(directory, "workspace")
 const threadIdPath = join(directory, "thread-id")
 const eventsPath = join(directory, "events.jsonl")
-const interactive = process.stdout.isTTY === true
+const subscribers: ReadableStreamDefaultController<Uint8Array>[] = []
+const encoder = new TextEncoder()
 let queue: Promise<unknown> = Promise.resolve()
-let terminal: { address: string; input: Interface } | null = null
 
 mkdirSync(workspace, { recursive: true })
 
 const server = Bun.serve({
   hostname: "127.0.0.1",
+  idleTimeout: 0,
   port: Number(Bun.env["HUMMINGBIRDS_PORT"] ?? 3000),
-  fetch: (request) =>
-    new URL(request.url).pathname === "/hatch" ? hatch(request) : handleRequest(request, "bird"),
+  fetch: (request) => {
+    switch (new URL(request.url).pathname) {
+      case "/events":
+        return request.method === "GET"
+          ? streamEvents()
+          : new Response("GET /events", { status: 405 })
+      case "/hatch":
+        return hatch(request)
+      default:
+        return handleRequest(request)
+    }
+  },
 })
 const address = `http://127.0.0.1:${server.port}/ask`
 const agentsPath = join(workspace, "AGENTS.md")
@@ -92,8 +94,32 @@ if (!existsSync(agentsPath)) {
       .replaceAll("[seed]", Bun.env["HUMMINGBIRDS_SEED"] ?? "(none)"),
   )
 }
-console.log(JSON.stringify({ id: nodeId, pid: process.pid, url: address }))
-if (process.stdin.isTTY === true) void readTerminal().catch(console.error)
+const startup = `${JSON.stringify({ id: nodeId, pid: process.pid, url: address })}\n`
+emit(startup)
+
+function streamEvents(): Response {
+  let subscriber: ReadableStreamDefaultController<Uint8Array>
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      subscriber = controller
+      subscribers.push(controller)
+      controller.enqueue(encoder.encode(startup))
+    },
+    cancel() {
+      const index = subscribers.indexOf(subscriber)
+      if (index >= 0) subscribers.splice(index, 1)
+    },
+  })
+  return new Response(stream, {
+    headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+  })
+}
+
+function emit(line: string): void {
+  process.stdout.write(line)
+  const bytes = encoder.encode(line)
+  for (const subscriber of subscribers) subscriber.enqueue(bytes)
+}
 
 async function hatch(request: Request): Promise<Response> {
   if (request.method !== "POST") {
@@ -160,83 +186,37 @@ async function hatch(request: Request): Promise<Response> {
   return new Response("Bird did not start in time.", { status: 500 })
 }
 
-async function readTerminal(): Promise<void> {
-  const inbox = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch: (request) => handleRequest(request, "human"),
-  })
-  const humanAddress = `http://127.0.0.1:${inbox.port}/ask`
-  const background = 101 + Number(Bun.hash.wyhash("human") % 6n)
-  const prompt = `\x1b[30;${background}m You \x1b[0m `
-  const input = createInterface({ input: process.stdin, output: process.stdout, prompt, terminal: interactive })
-  if (interactive) {
-    terminal = { address: humanAddress, input }
-    input.on("SIGINT", () => {
-      input.close()
-      process.kill(process.pid, "SIGINT")
-    })
-    input.prompt()
-  }
-  for await (const line of input) {
-    if (line.trim() !== "") {
-      await fetch(address, {
-        method: "POST",
-        headers: {
-          [headers.callerId]: "human",
-          [headers.replyTo]: humanAddress,
-        },
-        body: line,
-      })
-    }
-    if (interactive) renderTerminal("")
-  }
-  terminal = null
-  await inbox.stop()
-}
-
-function renderTerminal(text: string): void {
-  if (terminal === null) {
-    process.stdout.write(text)
-    return
-  }
-  process.stdout.write(`\r\x1b[2K${text}`)
-  terminal.input.prompt(true)
-  process.stdout.write(terminal.input.line)
-}
-
-async function handleRequest(request: Request, recipient: "bird" | "human"): Promise<Response> {
+async function handleRequest(request: Request): Promise<Response> {
   if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
     return new Response("POST a plain-text message to /ask", { status: 404 })
   }
+  const incomingRequest = request.headers.get(headers.requestId)
   const inReplyTo = request.headers.get(headers.inReplyTo)
-  const invocationId = request.headers.get(headers.invocationId) ?? crypto.randomUUID()
-  const requestId = request.headers.get(headers.requestId) ?? inReplyTo ?? crypto.randomUUID()
-  const path = parsePath(request.headers.get(headers.path))
+  if (incomingRequest !== null && inReplyTo !== null) {
+    return new Response("Send either x-request or x-in-reply-to, not both.", { status: 400 })
+  }
+  const requestId = incomingRequest ?? inReplyTo ?? crypto.randomUUID()
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+    return new Response("Request IDs must be canonical UUIDs.", { status: 400 })
+  }
+  const invocationId = crypto.randomUUID()
+  const path = parsePath(request.headers.get(headers.route))
   if (path === null) {
-    return reply(400, `${headers.path} must be a JSON array of node IDs`, {
-      invocationId,
-      requestId,
-    })
+    return reply(400, `${headers.route} must be a JSON array of node IDs`, { requestId })
   }
   const context: Context = {
     callerId: request.headers.get(headers.callerId) ?? "human",
     inReplyTo,
     invocationId,
-    parentInvocationId: request.headers.get(headers.parentInvocationId),
     path,
     replyTo: request.headers.get(headers.replyTo),
     requestId,
   }
   const question = await request.text()
-  if (recipient === "bird") record(context, { kind: "received", question })
+  record(context, { kind: "received", question })
   // Usually a reply whose body never made it into curl; better to hear about it now.
   if (question.trim() === "") return reject(400, "Empty message.", context)
-  if (recipient === "human") {
-    record(context, { kind: "delivered", question })
-    return reply(202, "Accepted by human.", context)
-  }
-  // A message with no Reply-to is fine: it may just share a fact or request an action.
+  // A message with no x-reply-to is fine: it may just share a fact or request an action.
   // A question that already went through this bird is a cycle; nothing else would
   // stop it going round forever. A reply is not a question, so its path is fine.
   if (inReplyTo === null && context.path.includes(nodeId)) {
@@ -273,11 +253,8 @@ async function reportFailure(replyTo: string, message: string, context: Context)
       "content-type": "text/plain; charset=utf-8",
       [headers.callerId]: nodeId,
       [headers.inReplyTo]: context.requestId,
-      [headers.invocationId]: crypto.randomUUID(),
-      [headers.parentInvocationId]: context.invocationId,
-      [headers.path]: JSON.stringify(outgoingPath(context)),
+      [headers.route]: JSON.stringify(outgoingPath(context)),
       [headers.replyTo]: address,
-      [headers.requestId]: context.requestId,
     },
     body: message,
   }).catch(() => {})
@@ -310,12 +287,9 @@ async function ask(question: string, context: Context): Promise<string> {
     cwd: workspace,
     env: {
       ...process.env,
-      HUMMINGBIRDS_CALLER_ID: context.callerId,
-      HUMMINGBIRDS_INVOCATION_ID: context.invocationId,
       HUMMINGBIRDS_NODE_ADDRESS: address,
       HUMMINGBIRDS_NODE_ID: nodeId,
-      HUMMINGBIRDS_PARENT_INVOCATION_ID: context.parentInvocationId ?? "",
-      HUMMINGBIRDS_PATH: JSON.stringify(outgoingPath(context)),
+      HUMMINGBIRDS_ROUTE: JSON.stringify(outgoingPath(context)),
       HUMMINGBIRDS_REQUEST_ID: context.requestId,
     },
     stdin: new Blob([envelope(question, context)]),
@@ -324,7 +298,7 @@ async function ask(question: string, context: Context): Promise<string> {
   })
   record(context, { kind: "started", codexPid: child.pid, threadId })
   const [startedThreadId, exitCode] = await Promise.all([
-    readCodexOutput(child.stdout, context),
+    readCodexOutput(child.stdout),
     child.exited,
   ])
 
@@ -342,42 +316,34 @@ async function ask(question: string, context: Context): Promise<string> {
   return startedThreadId
 }
 
-async function readCodexOutput(
-  stream: ReadableStream<Uint8Array>,
-  context: Context,
-): Promise<string | null> {
+async function readCodexOutput(stream: ReadableStream<Uint8Array>): Promise<string | null> {
   const decoder = new TextDecoder()
   let pending = ""
   let startedThreadId: string | null = null
 
   function readLines(lines: string[]): void {
-    let display = ""
     for (const line of lines) {
-      const event = parseEvent(line)
-      if (event?.kind === "thread") startedThreadId = event.threadId
-      if (!interactive) continue
-      display += `\x1b[90m${line}\x1b[0m\n`
-      if (event === null) continue
-      switch (event.kind) {
-        case "thread":
-          break
-        case "outgoing": {
-          const outgoing = outgoingMessage(event.command, context)
-          if (outgoing !== null && (terminal === null || outgoing.address !== terminal.address)) {
-            display += formatMessage(`→ ${outgoing.recipient}`, outgoing.message)
-          }
-          break
+      emit(`${line}\n`)
+      if (!line.startsWith("{")) continue
+      try {
+        const event: unknown = JSON.parse(line)
+        if (
+          typeof event === "object" &&
+          event !== null &&
+          "type" in event &&
+          event.type === "thread.started" &&
+          "thread_id" in event &&
+          typeof event.thread_id === "string"
+        ) {
+          startedThreadId = event.thread_id
         }
-        case "message":
-          if (event.text !== "") display += formatMessage(`${nodeId}:`, event.text)
-          break
+      } catch {
+        // Diagnostics are still streamed even when they are not valid JSON.
       }
     }
-    if (interactive) renderTerminal(display)
   }
 
   for await (const chunk of stream) {
-    if (!interactive) process.stdout.write(chunk)
     pending += decoder.decode(chunk, { stream: true })
     const newline = pending.lastIndexOf("\n")
     if (newline < 0) continue
@@ -387,66 +353,6 @@ async function readCodexOutput(
   pending += decoder.decode()
   if (pending !== "") readLines([pending])
   return startedThreadId
-}
-
-function outgoingMessage(
-  command: string,
-  context: Context,
-): { address: string; recipient: string; message: string } | null {
-  let words = shellWords(command)
-  const script = words.find((word) => /(?:^|\s)(?:\S+\/)?curl\s/.test(word))
-  if (script !== undefined) words = shellWords(script)
-
-  const curl = words.findIndex((word) => word === "curl" || word.endsWith("/curl"))
-  if (curl < 0) return null
-  const target = words
-    .slice(curl + 1)
-    .find((word) => /^https?:\/\/\S+\/ask(?:\?\S*)?$/.test(word))
-  if (target === undefined) return null
-
-  const data = words.findIndex((word) => /^(?:--data(?:-binary|-raw)?|-d)(?:=.*)?$/.test(word))
-  const option = words[data]
-  if (option === undefined) return null
-  const separator = option.indexOf("=")
-  const message = separator < 0 ? words[data + 1] : option.slice(separator + 1)
-  if (message === undefined) return null
-
-  if (context.replyTo === target) return { address: target, recipient: context.callerId, message }
-  const configuredPeers = Bun.env["HUMMINGBIRDS_PEERS"] ?? readFileSync(agentsPath, "utf8")
-  for (const match of configuredPeers.matchAll(/^\s*-\s+(\S+)\s+at\s+(\S+)/gm)) {
-    if (match[2] === target) return { address: target, recipient: match[1] ?? target, message }
-  }
-  return { address: target, recipient: target, message }
-}
-
-function shellWords(command: string): string[] {
-  const words: string[] = []
-  let word = ""
-  let quote: "'" | '"' | null = null
-
-  for (let index = 0; index < command.length; index += 1) {
-    const character = command.charAt(index)
-    if (character === quote) {
-      quote = null
-    } else if (quote === null && (character === "'" || character === '"')) {
-      quote = character
-    } else if (character === "\\" && quote !== "'") {
-      const escaped = command.charAt(index + 1)
-      if (quote === '"' && !"$`\"\\\n".includes(escaped)) {
-        word += character
-      } else {
-        index += 1
-        if (escaped !== "\n") word += escaped
-      }
-    } else if (quote === null && /\s/.test(character)) {
-      if (word !== "") words.push(word)
-      word = ""
-    } else {
-      word += character
-    }
-  }
-  if (word !== "") words.push(word)
-  return words
 }
 
 // The path this bird's own calls carry. A reply comes back with the path the question
@@ -460,13 +366,13 @@ function outgoingPath(context: Context): string[] {
 // What Codex reads: who sent the message, which request it belongs to, where the
 // answer should go, then the message itself.
 function envelope(question: string, context: Context): string {
-  // Caller-chosen IDs are metadata; never let them become instructions to the bird.
-  const identifier = Bun.hash.wyhash(context.inReplyTo ?? context.requestId).toString(16)
   const lines = [
-    `From: ${context.callerId}`,
-    context.inReplyTo === null ? `Request: ${identifier}` : `Re: ${identifier}`,
+    `${headers.callerId}: ${context.callerId}`,
+    context.inReplyTo === null
+      ? `${headers.requestId}: ${context.requestId}`
+      : `${headers.inReplyTo}: ${context.inReplyTo}`,
   ]
-  if (context.replyTo !== null) lines.push(`Reply-to: ${context.replyTo}`)
+  if (context.replyTo !== null) lines.push(`${headers.replyTo}: ${context.replyTo}`)
   return `${lines.join("\n")}\n\n${question}`
 }
 
@@ -474,34 +380,7 @@ function record(context: Context, event: Event): void {
   const { kind, ...details } = event
   const line = `${JSON.stringify({ ...context, ...details, at: Date.now(), kind })}\n`
   appendFileSync(eventsPath, line)
-  if (!interactive) {
-    process.stdout.write(line)
-    return
-  }
-  let display = `\x1b[90m${line.slice(0, -1)}\x1b[0m\n`
-  switch (event.kind) {
-    case "received":
-      if (context.callerId !== "human") {
-        display += formatMessage(`← ${context.callerId}`, event.question)
-      }
-      break
-    case "delivered":
-      display += formatMessage(context.callerId, event.question, context.callerId)
-      break
-    case "rejected":
-    case "started":
-    case "completed":
-    case "failed":
-      break
-  }
-  renderTerminal(display)
-}
-
-function formatMessage(label: string, text: string, sender?: string): string {
-  const message = Bun.stripANSI(text).replaceAll("\n", "\n    ")
-  if (sender === undefined) return `${Bun.stripANSI(label)}${label.endsWith(":") ? " " : "  "}${message}\n`
-  const background = 101 + Number(Bun.hash.wyhash(sender) % 6n)
-  return `\x1b[30;${background}m ${Bun.stripANSI(label)} \x1b[0m ${message}\n`
+  emit(line)
 }
 
 function reject(status: number, body: string, context: Context): Response {
@@ -509,16 +388,11 @@ function reject(status: number, body: string, context: Context): Response {
   return reply(status, body, context)
 }
 
-function reply(
-  status: number,
-  body: string,
-  context: Pick<Context, "invocationId" | "requestId">,
-): Response {
+function reply(status: number, body: string, context: Pick<Context, "requestId">): Response {
   return new Response(body, {
     status,
     headers: {
       "content-type": "text/plain; charset=utf-8",
-      [headers.invocationId]: context.invocationId,
       [headers.requestId]: context.requestId,
     },
   })
@@ -531,35 +405,6 @@ function parsePath(raw: string | null): string[] | null {
     if (!Array.isArray(value)) return null
     const ids: unknown[] = value
     return ids.every((id): id is string => typeof id === "string") ? ids : null
-  } catch {
-    return null
-  }
-}
-
-function parseEvent(line: string): CodexEvent | null {
-  if (!line.startsWith("{")) return null
-  try {
-    const event: unknown = JSON.parse(line)
-    if (typeof event !== "object" || event === null || !("type" in event)) return null
-    switch (event.type) {
-      case "thread.started":
-        if (!("thread_id" in event) || typeof event.thread_id !== "string") return null
-        return { kind: "thread", threadId: event.thread_id }
-      case "item.started":
-      case "item.completed": {
-        if (!("item" in event) || typeof event.item !== "object" || event.item === null) return null
-        const item = event.item
-        if (!("type" in item)) return null
-        if (event.type === "item.started") {
-          if (item.type !== "command_execution" || !("command" in item)) return null
-          return typeof item.command === "string" ? { kind: "outgoing", command: item.command } : null
-        }
-        if (item.type !== "agent_message" || !("text" in item)) return null
-        return typeof item.text === "string" ? { kind: "message", text: item.text } : null
-      }
-      default:
-        return null
-    }
   } catch {
     return null
   }

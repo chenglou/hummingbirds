@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "bun run src/server.ts",
+    "chat": "bun run src/chat.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --type-aware src tests experiments",

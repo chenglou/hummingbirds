@@ -10,7 +10,21 @@ codex login
 bun start
 ```
 
-In an interactive terminal, type messages directly. Replies arrive at your local human inbox just like messages between birds. `bun start` prints every raw bird and Codex event as it arrives; without an interactive terminal, the same command runs the HTTP server for deployment.
+`bun start` only runs the bird and prints its raw event stream. In another terminal, attach to it:
+
+```sh
+bun chat
+```
+
+Chat shows the conversation, peer messages, and replies without raw logs. Messages use the same protocol as messages between birds. To attach to a different bird, pass its port, host and port, or URL:
+
+```sh
+bun chat 3001
+bun chat localhost:3001
+bun chat http://localhost:3001
+```
+
+`bun chat` currently expects a local bird: its reply inbox is bound to localhost.
 
 You can also send a message with curl:
 
@@ -49,7 +63,7 @@ cd temp/b && bun start
 cd temp/c && bun start
 ```
 
-Type into any bird's terminal, or send it a message over HTTP:
+Attach to any bird with `bun chat 3001`, or send it a message over HTTP:
 
 ```sh
 curl localhost:3001/ask -d "Ask your peers what Ben likes."
@@ -59,6 +73,6 @@ Birds send plain-text messages to one another and return immediately. Replies ar
 
 A bird can also hatch another independent bird through its own local `/hatch` endpoint. Each child has its own ignored `bird-<id>/` directory, starts with a fresh conversation, and learns through ordinary messages. `HUMMINGBIRDS_HATCH_MAX_BIRDS` limits each local flock to 32 children by default.
 
-The runtime is [src/server.ts](src/server.ts); its instructions come from [src/prompt_template.md](src/prompt_template.md). Resuming a bird also requires the same Codex home, which stores the conversation.
+The bird server is [src/server.ts](src/server.ts), the terminal client is [src/chat.ts](src/chat.ts), and bird instructions come from [src/prompt_template.md](src/prompt_template.md). Resuming a bird also requires the same Codex home, which stores the conversation.
 
 Open directions are in [experiments/ideas.md](experiments/ideas.md). Run `bun run check` and `bun run knip` for deterministic verification.

@@ -19,14 +19,13 @@ type Event = {
   requestId: string
 } & (
   | { kind: "received"; question: string }
-  | { kind: "delivered"; question: string }
   | { kind: "rejected"; error: string }
   | { kind: "failed"; error: string }
   | { kind: "started"; threadId: string | null }
   | { kind: "completed"; threadId: string }
 )
 
-type Message = { body: string; from: string; inReplyTo: string | null }
+type Message = { body: string; from: string; inReplyTo: string | null; request: string | null }
 
 const fakeCodex = resolve("tests/fake-codex.ts")
 const temporaryDirectories: string[] = []
@@ -41,6 +40,8 @@ describe("Hummingbirds", () => {
   test("starts a bird, streams its conversation, and resumes after a restart", async () => {
     const directory = join(await makeTemporaryDirectory(), "bird")
     let bird: Bird | null = null
+    let stream: ReadableStreamDefaultReader<Uint8Array> | null = null
+    let mirror: ReadableStreamDefaultReader<Uint8Array> | null = null
 
     try {
       bird = await startBird(directory, { PATH: dirname(process.execPath) })
@@ -49,12 +50,59 @@ describe("Hummingbirds", () => {
       const agents = await readFile(agentsPath, "utf8")
       expect(agents).toContain(`Your ID is bird, and your address is ${bird.url}.`)
       expect(agents).not.toContain("[peers]")
+      expect(agents).not.toContain("parent-invocation-id")
 
-      const first = await send(bird, "Remember Ben likes hiking.", "q-first")
+      const eventResponse = await fetch(new URL("/events", bird.url))
+      expect(eventResponse.headers.get("content-type")).toContain("application/x-ndjson")
+      if (eventResponse.body === null) throw new Error("Bird did not provide an event stream")
+      stream = eventResponse.body.getReader()
+      let streamed = new TextDecoder().decode((await stream.read()).value)
+      expect(JSON.parse(streamed.trim())).toEqual({
+        id: "bird",
+        pid: bird.process.pid,
+        url: bird.url,
+      })
+      const mirrorResponse = await fetch(new URL("/events", bird.url))
+      if (mirrorResponse.body === null) throw new Error("Bird did not provide a second event stream")
+      mirror = mirrorResponse.body.getReader()
+      let mirrored = new TextDecoder().decode((await mirror.read()).value)
+      expect(mirrored).toBe(streamed)
+      expect((await fetch(new URL("/events", bird.url), { method: "POST" })).status).toBe(405)
+
+      const first = await send(bird, "Remember Ben likes hiking.", opaque("q-first"))
       expect([first.status, await first.text()]).toEqual([202, "Accepted by bird."])
       await waitUntil(async () => {
         return (await events(originalBird)).some((event) => event.kind === "completed")
       })
+      while (!streamed.includes('"kind":"completed"')) {
+        const chunk = await stream.read()
+        if (chunk.done) throw new Error("Bird closed its event stream")
+        streamed += new TextDecoder().decode(chunk.value)
+      }
+      while (!mirrored.includes('"kind":"completed"')) {
+        const chunk = await mirror.read()
+        if (chunk.done) throw new Error("Bird closed its second event stream")
+        mirrored += new TextDecoder().decode(chunk.value)
+      }
+      expect(mirrored).toBe(streamed)
+      expect(streamed).toContain('"kind":"received"')
+      expect(streamed).toContain('"type":"thread.started"')
+      expect(streamed).not.toContain("\u001b[")
+      expect(streamed).not.toContain('"parentInvocationId"')
+
+      await mirror.cancel()
+      mirror = null
+      const streamRequest = opaque("q-stream")
+      expect((await send(bird, "One subscriber remains.", streamRequest)).status).toBe(202)
+      while ((streamed.match(/"kind":"completed"/g) ?? []).length < 2) {
+        const chunk = await stream.read()
+        if (chunk.done) throw new Error("Bird closed its surviving event stream")
+        streamed += new TextDecoder().decode(chunk.value)
+      }
+      expect(streamed).toContain(`"requestId":"${streamRequest}"`)
+      await stream.cancel()
+      stream = null
+
       const threadIdPath = join(directory, "bird", "thread-id")
       const threadId = await readFile(threadIdPath, "utf8")
 
@@ -70,20 +118,21 @@ describe("Hummingbirds", () => {
       bird = await startBird(directory, {}, port)
       const restartedBird = bird
       expect(await readFile(agentsPath, "utf8")).toBe(agents)
-      expect((await send(bird, "And Ben likes camping.", "q-second")).status).toBe(202)
+      expect((await send(bird, "And Ben likes camping.", opaque("q-second"))).status).toBe(202)
       await waitUntil(async () => {
-        return (await events(restartedBird)).filter((event) => event.kind === "completed").length === 2
+        return (await events(restartedBird)).filter((event) => event.kind === "completed").length === 3
       })
       expect(await readFile(threadIdPath, "utf8")).toBe(threadId)
     } finally {
+      if (mirror !== null) await mirror.cancel()
+      if (stream !== null) await stream.cancel()
       if (bird !== null) await stopBird(bird)
     }
   }, 15_000)
 
-  test("accepts typed terminal messages alongside HTTP on the same conversation", async () => {
-    const directory = join(await makeTemporaryDirectory(), "interactive")
+  test("keeps the foreground server noninteractive even in a terminal", async () => {
+    const directory = join(await makeTemporaryDirectory(), "foreground")
     await mkdir(directory, { recursive: true })
-    const peer = startInbox()
     const decoder = new TextDecoder()
     let output = ""
     const child = Bun.spawn([process.execPath, "run", resolve("src/server.ts")], {
@@ -92,9 +141,7 @@ describe("Hummingbirds", () => {
         ...Bun.env,
         HUMMINGBIRDS_CODEX: fakeCodex,
         HUMMINGBIRDS_DIRECTORY: join(directory, "bird"),
-        HUMMINGBIRDS_FAKE_DELAY_MS: "100",
-        HUMMINGBIRDS_NODE_ID: "interactive",
-        HUMMINGBIRDS_PEERS: `- b at ${peer.url}`,
+        HUMMINGBIRDS_NODE_ID: "foreground",
         HUMMINGBIRDS_PORT: "0",
       },
       terminal: {
@@ -106,12 +153,46 @@ describe("Hummingbirds", () => {
       },
     })
     const terminal = child.terminal
-    if (terminal === undefined) throw new Error("Bird did not start in a terminal")
+    if (terminal === undefined) throw new Error("Server did not start in a terminal")
 
     try {
-      await waitUntil(async () => output.includes('"id":"interactive"'))
-      const ready = JSON.parse(output.split("\n")[0] ?? "") as { url: string }
-      const bird = { directory, url: ready.url }
+      await waitUntil(async () => output.includes('"id":"foreground"'))
+      const startup = JSON.parse(output.split("\n")[0] ?? "") as { url: string }
+      terminal.write("This is not a message.\n")
+      const response = await fetch(startup.url, { method: "POST", body: "This is a message." })
+      expect(response.status).toBe(202)
+      await waitUntil(async () => {
+        return (await events({ directory })).some((event) => event.kind === "completed")
+      })
+      expect(
+        (await events({ directory }))
+          .filter((event) => event.kind === "received")
+          .map((event) => event.question),
+      ).toEqual(["This is a message."])
+      expect(output).not.toContain(" You ")
+      expect(output).not.toContain("\u001b[")
+    } finally {
+      if (child.exitCode === null) child.kill()
+      await child.exited
+      terminal.close()
+    }
+  }, 10_000)
+
+  test("attaches an independent terminal while HTTP uses the same conversation", async () => {
+    const directory = join(await makeTemporaryDirectory(), "interactive")
+    const peer = startInbox()
+    const bird = await startBird(directory, {
+      HUMMINGBIRDS_FAKE_DELAY_MS: "100",
+      HUMMINGBIRDS_PEERS: `- b at ${peer.url}`,
+    })
+    let output = ""
+    const child = startChat(directory, new URL(bird.url).port, (chunk) => {
+      output += chunk
+    })
+    const terminal = child.terminal
+    if (terminal === undefined) throw new Error("Chat did not start in a terminal")
+
+    try {
       await waitUntil(async () => Bun.stripANSI(output).includes(" You "))
 
       terminal.write("\nFirst typed message\n  \n")
@@ -137,8 +218,8 @@ describe("Hummingbirds", () => {
       const response = await fetch(bird.url, {
         method: "POST",
         headers: {
-          "x-hummingbirds-caller-id": "peer-a",
-          "x-hummingbirds-request-id": "q-http",
+          "x-from": "peer-a",
+          "x-request": opaque("q-http"),
         },
         body: httpMessage,
       })
@@ -157,15 +238,6 @@ describe("Hummingbirds", () => {
       ])
       expect(incoming.map((event) => event.callerId)).toEqual(["human", "peer-a", "human"])
       expect(incoming.map((event) => event.replyTo)).toEqual([humanAddress, null, humanAddress])
-      const deliveries = trace.filter((event) => event.kind === "delivered")
-      expect(deliveries.map((event) => event.question)).toEqual([
-        "Handled by interactive: First typed message",
-        "Handled by interactive: Second typed message",
-      ])
-      expect(deliveries.map((event) => event.callerId)).toEqual(["interactive", "interactive"])
-      expect(deliveries.map((event) => event.inReplyTo)).toEqual(
-        incoming.filter((event) => event.callerId === "human").map((event) => event.requestId),
-      )
 
       const turns = trace.filter((event) => event.kind === "started" || event.kind === "completed")
       expect(turns.map((event) => event.kind)).toEqual([
@@ -185,26 +257,20 @@ describe("Hummingbirds", () => {
       ).toBe(true)
 
       await waitUntil(async () => output.includes("Handled by interactive: Second typed message"))
-      expect(output).toContain('"kind":"received"')
-      expect(output).toContain('"type":"thread.started"')
-      expect(output).toContain('"type":"item.completed"')
+      expect(output).not.toContain('{"')
       const coloredOutput = output.replaceAll("\u001b", "ESC")
-      expect(coloredOutput).toMatch(/ESC\[90m\{"callerId":"human"/)
-      expect(coloredOutput).toMatch(/ESC\[90m\{"thread_id":/)
+      expect(coloredOutput).not.toContain("ESC[90m")
       const promptColors = [...coloredOutput.matchAll(/ESC\[30;(10[1-6])m You ESC\[0m/g)].map(
         (match) => match[1],
       )
       expect(promptColors.length).toBeGreaterThanOrEqual(2)
       expect(promptColors.every((color) => color === promptColors[0])).toBe(true)
       expect(coloredOutput).toMatch(
-        /ESC\[90m\{"callerId":"interactive"[^\r\n]*"question":"Handled by interactive: First typed message"[^\r\n]*"kind":"delivered"\}ESC\[0m\r?\nESC\[30;10[1-6]m interactive ESC\[0m Handled by interactive: First typed message/,
+        /ESC\[30;10[1-6]m interactive ESC\[0m Handled by interactive: First typed message/,
       )
       expect(coloredOutput).not.toMatch(/ESC\[30;10[1-6]m H ESC\[0m/)
       expect(coloredOutput).not.toMatch(/ESC\[30;10[1-6]m (P|peer-a) ESC\[0m/)
       expect(coloredOutput).not.toMatch(/ESC\[30;10[1-6]m interactive \(self\) ESC\[0m/)
-      expect(coloredOutput).toMatch(
-        /ESC\[90m\{"callerId":"peer-a"[^\r\n]*"kind":"received"\}ESC\[0m\r?\n← peer-a  Ordinary HTTP message/,
-      )
       const plainOutput = Bun.stripANSI(output)
       expect(plainOutput).toContain(" You ")
       expect(plainOutput).toMatch(/← peer-a  Ordinary HTTP message\r?\n {4}Second line\r?\n/)
@@ -212,109 +278,143 @@ describe("Hummingbirds", () => {
         /interactive: Handled by interactive: Ordinary HTTP message\r?\n {4}Second line\r?\n/,
       )
       expect(plainOutput).not.toContain("→ human")
-      const visibleLines = Bun.stripANSI(
-        output
-          .replaceAll("\u001b[2K", "\r")
-          .replaceAll("\u001b[0K", "\r")
-          .replaceAll("\u001b[1G", "\r"),
-      ).split(/[\r\n]/)
-      expect(visibleLines.filter((line) => line.includes(" You ") && line.includes('{"'))).toEqual([])
       expect(output).not.toContain("\u001b[31m")
       expect(await readFile(join(directory, "bird", "events.jsonl"), "utf8")).not.toContain(
         "\u001b[",
       )
+      expect(await readFile(join(directory, "bird", "events.jsonl"), "utf8")).not.toContain(
+        '"kind":"delivered"',
+      )
 
       const peerMessage = "What does b know about Nacre-A's path C:\\harbor?"
+      const unknownPeer = `→ ${peer.url}  ${peerMessage}`
       terminal.write(`${peerMessage}\n`)
       await waitUntil(async () => {
         return (
           peer.messages.length === 1 &&
-          output.includes(`→ b  ${peerMessage}`) &&
+          output.includes(unknownPeer) &&
           (await events(bird)).filter((event) => event.kind === "completed").length === 4
         )
       })
       expect(peer.messages[0]?.body).toBe(peerMessage)
-      const outboundOutput = output.replaceAll("\u001b", "ESC")
-      expect(outboundOutput).toMatch(
-        /ESC\[90m\{"type":"item.started","item":\{[^\r\n]*"type":"command_execution"[^\r\n]*\}\}ESC\[0m\r?\n→ b  What does b know about Nacre-A's path C:\\harbor\?\r?\n/,
+      expect(peer.messages[0]?.request).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
       )
-      expect(
-        outboundOutput.match(/→ b  What does b know about Nacre-A's path C:\\harbor\?/g),
-      ).toHaveLength(1)
-      const executions = Bun.stripANSI(output)
-        .split(/[\r\n]/)
-        .filter(
-          (line) =>
-            line.startsWith('{"type":"item.') &&
-            line.includes('"type":"command_execution"') &&
-            line.includes(peer.url),
-        )
-        .map((line) => JSON.parse(line) as { item: { command: string; id: string }; type: string })
-      expect(executions.map((event) => event.type)).toEqual(["item.started", "item.completed"])
-      expect(executions[0]?.item.id).toBe(executions[1]?.item.id)
-      expect(executions[0]?.item.command).toBe(executions[1]?.item.command)
+      expect(peer.messages[0]?.inReplyTo).toBeNull()
+      expect(output.split(unknownPeer)).toHaveLength(2)
 
       const peerQuestion = (await events(bird)).find(
         (event) => event.kind === "received" && event.question === peerMessage,
       )
       if (peerQuestion === undefined) throw new Error("Missing peer question")
+      expect(peer.messages[0]?.request).toBe(peerQuestion.requestId)
       const peerReply = await fetch(bird.url, {
         method: "POST",
         headers: {
-          "x-hummingbirds-caller-id": "b",
-          "x-hummingbirds-in-reply-to": peerQuestion.requestId,
-          "x-hummingbirds-path": JSON.stringify(["interactive", "b"]),
-          "x-hummingbirds-reply-to": peer.url,
-          "x-hummingbirds-request-id": peerQuestion.requestId,
+          "x-from": "b",
+          "x-in-reply-to": peerQuestion.requestId,
+          "x-route": JSON.stringify(["interactive", "b"]),
+          "x-reply-to": peer.url,
         },
         body: "B knows Nacre-A.",
       })
       expect([peerReply.status, await peerReply.text()]).toEqual([202, "Accepted by interactive."])
       await waitUntil(async () => {
-        const updatedTrace = await events(bird)
         return (
-          updatedTrace.some(
-            (event) =>
-              event.kind === "delivered" &&
-              event.inReplyTo === peerQuestion.requestId &&
-              event.question === "B knows Nacre-A.",
-          ) &&
-          updatedTrace.some(
+          (await events(bird)).some(
             (event) => event.kind === "completed" && event.inReplyTo === peerQuestion.requestId,
           ) &&
           Bun.stripANSI(output).includes("interactive  B knows Nacre-A.")
         )
       })
-      const deliveredReply = (await events(bird)).find(
-        (event) => event.kind === "delivered" && event.inReplyTo === peerQuestion.requestId,
-      )
-      expect(deliveredReply?.callerId).toBe("interactive")
-      expect(deliveredReply?.requestId).toBe(peerQuestion.requestId)
-      expect(deliveredReply?.replyTo).toBe(bird.url)
+      expect(output).not.toContain(peerQuestion.requestId)
       expect(output.replaceAll("\u001b", "ESC")).toMatch(
         /ESC\[30;10[1-6]m interactive ESC\[0m B knows Nacre-A\./,
       )
       expect(Bun.stripANSI(output)).not.toContain(`→ ${humanAddress}`)
 
+      const knownPeerMessage = "What does b know about Nacre-B?"
+      terminal.write(`${knownPeerMessage}\n`)
+      await waitUntil(async () => {
+        return peer.messages.length === 2 && output.includes(`→ b  ${knownPeerMessage}`)
+      })
+
+      for (const headers of [
+        { "x-request": "create-child" },
+        { "x-in-reply-to": "create-child" },
+        { "x-request": opaque("invalid-inbox"), "x-in-reply-to": opaque("invalid-inbox") },
+      ]) {
+        const invalid = await fetch(humanAddress, {
+          method: "POST",
+          headers,
+          body: "This invalid message must not appear.",
+        })
+        expect(invalid.status).toBe(400)
+      }
+      expect(output).not.toContain("This invalid message must not appear.")
+
       const emptyHumanDelivery = await fetch(humanAddress, {
         method: "POST",
-        headers: { "x-hummingbirds-request-id": "q-empty-human" },
+        headers: { "x-request": opaque("q-empty-human") },
         body: " \n",
       })
       expect([emptyHumanDelivery.status, await emptyHumanDelivery.text()]).toEqual([
         400,
         "Empty message.",
       ])
-      expect(
-        (await events(bird)).some(
-          (event) => event.kind === "delivered" && event.requestId === "q-empty-human",
-        ),
-      ).toBe(false)
+      expect(output).not.toContain('"requestId":"q-empty-human"')
+      expect(output).not.toContain('{"')
     } finally {
       if (child.exitCode === null) child.kill()
       await child.exited
       terminal.close()
+      await stopBird(bird)
       peer.stop()
+    }
+  }, 15_000)
+
+  test("attaches by current port, explicit port, host, or HTTP origin", async () => {
+    const bird = await startBird(join(await makeTemporaryDirectory(), "destinations"))
+    const port = new URL(bird.url).port
+    const destinations = [undefined, port, `localhost:${port}`, `http://127.0.0.1:${port}`]
+
+    try {
+      for (const [index, destination] of destinations.entries()) {
+        let output = ""
+        const child = startChat(
+          bird.directory,
+          destination,
+          (chunk) => {
+            output += chunk
+          },
+          { HUMMINGBIRDS_PORT: port },
+        )
+        const terminal = child.terminal
+        if (terminal === undefined) throw new Error("Chat did not start in a terminal")
+
+        try {
+          await waitUntil(async () => Bun.stripANSI(output).includes(" You "))
+          const message = `Destination ${index}`
+          terminal.write(`${message}\n`)
+          await waitUntil(async () => {
+            return Bun.stripANSI(output).includes(`destinations  Handled by destinations: ${message}`)
+          })
+        } finally {
+          if (child.exitCode === null) child.kill()
+          await child.exited
+          terminal.close()
+        }
+      }
+
+      const invalid = Bun.spawn([process.execPath, "run", resolve("src/chat.ts"), bird.url], {
+        cwd: bird.directory,
+        stderr: "pipe",
+        stdout: "ignore",
+      })
+      expect(await invalid.exited).not.toBe(0)
+      expect(await new Response(invalid.stderr).text()).toContain("without /ask or /events")
+    } finally {
+      await stopBird(bird)
     }
   }, 15_000)
 
@@ -338,26 +438,27 @@ describe("Hummingbirds", () => {
       })
       birds.push(a)
 
-      const training = await send(a, "What harbor phrase belongs to Nacre-A?", "q-train")
+      const trainingRequest = opaque("q-train")
+      const training = await send(a, "What harbor phrase belongs to Nacre-A?", trainingRequest)
       expect(training.status).toBe(202)
       await waitUntil(async () => {
         return (await events(a)).some(
-          (event) => event.kind === "completed" && event.inReplyTo === "q-train",
+          (event) => event.kind === "completed" && event.inReplyTo === trainingRequest,
         )
       })
       const trainingReply = (await events(a))
         .filter((event) => event.kind === "received")
-        .find((event) => event.inReplyTo === "q-train")
+        .find((event) => event.inReplyTo === trainingRequest)
       expect(trainingReply?.question).toBe(`Amber Tern-417.\n\nContributors: c at ${c.url}`)
-      expect(received(await events(a), "q-train")).toEqual([
+      expect(received(await events(a), trainingRequest)).toEqual([
         ["human", null, null, []],
-        ["b", b.url, "q-train", ["a", "b"]],
+        ["b", b.url, trainingRequest, ["a", "b"]],
       ])
-      expect(received(await events(b), "q-train")).toEqual([
+      expect(received(await events(b), trainingRequest)).toEqual([
         ["a", a.url, null, ["a"]],
-        ["c", c.url, "q-train", ["a", "b", "c"]],
+        ["c", c.url, trainingRequest, ["a", "b", "c"]],
       ])
-      expect(received(await events(c), "q-train")).toEqual([["b", b.url, null, ["a", "b"]]])
+      expect(received(await events(c), trainingRequest)).toEqual([["b", b.url, null, ["a", "b"]]])
 
       const firstThreadId = await readFile(join(a.directory, "bird", "thread-id"), "utf8")
       const port = Number(new URL(a.url).port)
@@ -365,23 +466,24 @@ describe("Hummingbirds", () => {
       a = await startBird(a.directory, {}, port)
       birds[2] = a
 
-      const probe = await send(a, "What harbor phrase belongs to Nacre-B?", "q-probe")
+      const probeRequest = opaque("q-probe")
+      const probe = await send(a, "What harbor phrase belongs to Nacre-B?", probeRequest)
       expect(probe.status).toBe(202)
       await waitUntil(async () => {
         return (await events(a)).some(
-          (event) => event.kind === "completed" && event.inReplyTo === "q-probe",
+          (event) => event.kind === "completed" && event.inReplyTo === probeRequest,
         )
       })
       const probeReply = (await events(a))
         .filter((event) => event.kind === "received")
-        .find((event) => event.inReplyTo === "q-probe")
+        .find((event) => event.inReplyTo === probeRequest)
       expect(probeReply?.question).toBe(`Violet Shoal-862.\n\nContributors: c at ${c.url}`)
-      expect(received(await events(a), "q-probe")).toEqual([
+      expect(received(await events(a), probeRequest)).toEqual([
         ["human", null, null, []],
-        ["c", c.url, "q-probe", ["a", "c"]],
+        ["c", c.url, probeRequest, ["a", "c"]],
       ])
-      expect(received(await events(b), "q-probe")).toEqual([])
-      expect(received(await events(c), "q-probe")).toEqual([["a", a.url, null, ["a"]]])
+      expect(received(await events(b), probeRequest)).toEqual([])
+      expect(received(await events(c), probeRequest)).toEqual([["a", a.url, null, ["a"]]])
       expect(await readFile(join(a.directory, "bird", "thread-id"), "utf8")).toBe(firstThreadId)
     } finally {
       await Promise.all(birds.map(stopBird))
@@ -397,20 +499,22 @@ describe("Hummingbirds", () => {
     try {
       const questions = Array.from({ length: 5 }, (_, index) => `question ${index}`)
       const responses = await Promise.all(
-        questions.map((question, index) => send(bird, question, `request-${index}`, inbox.url)),
+        questions.map((question, index) =>
+          send(bird, question, opaque(`request-${index}`), inbox.url),
+        ),
       )
       expect(responses.map((response) => response.status)).toEqual([202, 202, 202, 202, 202])
 
       const cycle = await fetch(bird.url, {
         method: "POST",
         headers: {
-          "x-hummingbirds-path": JSON.stringify(["solo"]),
-          "x-hummingbirds-request-id": "q-cycle",
+          "x-route": JSON.stringify(["solo"]),
+          "x-request": opaque("q-cycle"),
         },
         body: "cyclic question",
       })
       expect([cycle.status, await cycle.text()]).toEqual([409, "Cycle rejected at solo."])
-      const empty = await send(bird, " \n", "q-empty", inbox.url)
+      const empty = await send(bird, " \n", opaque("q-empty"), inbox.url)
       expect([empty.status, await empty.text()]).toEqual([400, "Empty message."])
       const invalidRoute = await fetch(new URL("/unknown", bird.url), {
         method: "POST",
@@ -420,7 +524,7 @@ describe("Hummingbirds", () => {
         404,
         "POST a plain-text message to /ask",
       ])
-      expect((await send(bird, "just a command", "q-command")).status).toBe(202)
+      expect((await send(bird, "just a command", opaque("q-command"))).status).toBe(202)
 
       await waitUntil(async () => {
         return (await events(bird)).filter((event) => event.kind === "completed").length === 6
@@ -443,7 +547,8 @@ describe("Hummingbirds", () => {
         questions.map((question, index) => ({
           body: `Handled by solo: ${question}`,
           from: "solo",
-          inReplyTo: `request-${index}`,
+          inReplyTo: opaque(`request-${index}`),
+          request: null,
         })),
       )
       await stopBird(bird)
@@ -456,7 +561,7 @@ describe("Hummingbirds", () => {
     }
   }, 15_000)
 
-  test("keeps semantic request IDs opaque to birds while preserving wire-level correlation", async () => {
+  test("requires opaque exclusive request IDs and shows actual headers to birds", async () => {
     const root = await makeTemporaryDirectory()
     const source = await startBird(join(root, "source"), {
       HUMMINGBIRDS_SEED: "- Tideglass trial Nacre-A records the exact phrase “Opaque Harbor-17.”",
@@ -465,9 +570,35 @@ describe("Hummingbirds", () => {
       HUMMINGBIRDS_PEERS: `- source at ${source.url}`,
     })
     const inbox = startInbox()
-    const requestId = "create-child"
+    const requestId = opaque("opaque-visible-request")
 
     try {
+      for (const headers of [
+        { "x-request": "create-child" },
+        { "x-request": "not-a-uuid" },
+        { "x-in-reply-to": "create-child" },
+        { "x-request": requestId, "x-in-reply-to": requestId },
+      ]) {
+        const invalid = await fetch(receiver.url, {
+          method: "POST",
+          headers,
+          body: "Unsafe or ambiguous correlation.",
+        })
+        expect(invalid.status).toBe(400)
+      }
+      for (const path of ["not-json", "{}", '["receiver", 42]']) {
+        const invalid = await fetch(receiver.url, {
+          method: "POST",
+          headers: { "x-request": requestId, "x-route": path },
+          body: "Invalid forwarding path.",
+        })
+        expect([invalid.status, await invalid.text()]).toEqual([
+          400,
+          "x-route must be a JSON array of node IDs",
+        ])
+      }
+      expect(await events(receiver)).toEqual([])
+
       expect((await send(receiver, "What phrase belongs to Nacre-A?", requestId, inbox.url)).status).toBe(
         202,
       )
@@ -480,22 +611,62 @@ describe("Hummingbirds", () => {
         )
       })
       expect(inbox.messages[0]?.inReplyTo).toBe(requestId)
+      expect(inbox.messages[0]?.request).toBeNull()
       expect((await events(source)).find((event) => event.kind === "received")?.requestId).toBe(
         requestId,
       )
 
-      const identifier = Bun.hash.wyhash(requestId).toString(16)
       for (const [bird, field] of [
-        [source, "Request"],
-        [receiver, "Re"],
+        [source, "x-request"],
+        [receiver, "x-in-reply-to"],
       ] as const) {
         const threadId = await readFile(join(bird.directory, "bird", "thread-id"), "utf8")
         const session = JSON.parse(
           await readFile(join(bird.directory, "bird", "workspace", ".fake-codex", `${threadId}.json`), "utf8"),
         ) as { lastEnvelope: Record<string, string> }
-        expect(session.lastEnvelope[field]).toBe(identifier)
-        expect(session.lastEnvelope[field]).not.toBe(requestId)
+        expect(session.lastEnvelope[field]).toBe(requestId)
+        expect(Object.keys(session.lastEnvelope)).toEqual(["x-from", field, "x-reply-to"])
+        expect(session.lastEnvelope["x-route"]).toBeUndefined()
       }
+
+      const automatic = await fetch(receiver.url, {
+        method: "POST",
+        headers: { "x-reply-to": inbox.url },
+        body: "Generate my correlation ID.",
+      })
+      expect(automatic.status).toBe(202)
+      const generated = automatic.headers.get("x-request")
+      expect(generated).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+      expect(automatic.headers.has("x-invocation-id")).toBe(false)
+      await waitUntil(async () => inbox.messages.length === 2)
+      expect(inbox.messages[1]?.inReplyTo).toBe(generated)
+      expect(inbox.messages[1]?.request).toBeNull()
+
+      const notification = await fetch(receiver.url, {
+        method: "POST",
+        headers: { "x-from": "notifier" },
+        body: "A one-way notification.",
+      })
+      expect(notification.status).toBe(202)
+      const notificationId = notification.headers.get("x-request")
+      if (notificationId === null) throw new Error("One-way message did not receive a request ID")
+      await waitUntil(async () => {
+        return (await events(receiver)).some(
+          (event) => event.kind === "completed" && event.requestId === notificationId,
+        )
+      })
+      expect(inbox.messages).toHaveLength(2)
+      const receiverThreadId = await readFile(join(receiver.directory, "bird", "thread-id"), "utf8")
+      const receiverSession = JSON.parse(
+        await readFile(
+          join(receiver.directory, "bird", "workspace", ".fake-codex", `${receiverThreadId}.json`),
+          "utf8",
+        ),
+      ) as { lastEnvelope: Record<string, string> }
+      expect(receiverSession.lastEnvelope).toEqual({
+        "x-from": "notifier",
+        "x-request": notificationId,
+      })
     } finally {
       await Promise.all([stopBird(receiver), stopBird(source)])
       inbox.stop()
@@ -534,8 +705,8 @@ describe("Hummingbirds", () => {
       const response = await fetch(url, {
         method: "POST",
         headers: {
-          "x-hummingbirds-reply-to": inbox.url,
-          "x-hummingbirds-request-id": requestId,
+          "x-reply-to": inbox.url,
+          "x-request": opaque(requestId),
         },
         body: question,
       })
@@ -554,6 +725,26 @@ describe("Hummingbirds", () => {
       expect(prompt).toContain(`Your ID is sprout, and your address is ${child.url}.`)
       expect(prompt).toContain(`- parent at ${parent.url}`)
       expect(prompt).not.toContain("PARENT-ONLY-SECRET-71")
+
+      let chatOutput = ""
+      const chat = startChat(root, new URL(child.url).port, (chunk) => {
+        chatOutput += chunk
+      })
+      const terminal = chat.terminal
+      if (terminal === undefined) throw new Error("Child chat did not start in a terminal")
+      try {
+        await waitUntil(async () => Bun.stripANSI(chatOutput).includes(" You "))
+        terminal.write("Hello from the terminal.\n")
+        await waitUntil(async () => {
+          return Bun.stripANSI(chatOutput).includes(
+            "sprout  Handled by sprout: Hello from the terminal.",
+          )
+        })
+      } finally {
+        if (chat.exitCode === null) chat.kill()
+        await chat.exited
+        terminal.close()
+      }
 
       const duplicate = await fetch(new URL("/hatch", parent.url), {
         method: "POST",
@@ -669,16 +860,18 @@ describe("Hummingbirds", () => {
     const inbox = startInbox()
 
     try {
-      await send(bird, "first", "q-first", inbox.url)
+      const firstRequest = opaque("q-first")
+      await send(bird, "first", firstRequest, inbox.url)
       await waitUntil(async () => {
         return (await events(bird)).some(
-          (event) => event.kind === "completed" && event.requestId === "q-first",
+          (event) => event.kind === "completed" && event.requestId === firstRequest,
         )
       })
-      await send(bird, "second", "q-second", inbox.url)
+      const secondRequest = opaque("q-second")
+      await send(bird, "second", secondRequest, inbox.url)
       await waitUntil(async () => {
         return (await events(bird)).some(
-          (event) => event.kind === "completed" && event.requestId === "q-second",
+          (event) => event.kind === "completed" && event.requestId === secondRequest,
         )
       })
 
@@ -711,16 +904,19 @@ describe("Hummingbirds", () => {
       ])
 
       await writeFile(threadIdPath, "")
-      await send(bird, "third", "q-third", inbox.url)
+      const thirdRequest = opaque("q-third")
+      await send(bird, "third", thirdRequest, inbox.url)
       await waitUntil(async () => inbox.messages.length === 3)
       expect(inbox.messages[2]?.body).toMatch(/thread-id is empty$/)
+      expect(inbox.messages[2]?.inReplyTo).toBe(thirdRequest)
+      expect(inbox.messages[2]?.request).toBeNull()
       expect(await readArgv()).toHaveLength(2)
 
       const late = await fetch(bird.url, {
         method: "POST",
         headers: {
-          "x-hummingbirds-in-reply-to": "q-third",
-          "x-hummingbirds-reply-to": inbox.url,
+          "x-in-reply-to": thirdRequest,
+          "x-reply-to": inbox.url,
         },
         body: "a late reply",
       })
@@ -776,6 +972,29 @@ async function startBird(
   }
 }
 
+function startChat(
+  directory: string,
+  destination: string | undefined,
+  receive: (chunk: string) => void,
+  environment: Record<string, string> = {},
+) {
+  const decoder = new TextDecoder()
+  return Bun.spawn(
+    [process.execPath, "run", resolve("src/chat.ts"), ...(destination === undefined ? [] : [destination])],
+    {
+      cwd: directory,
+      env: { ...Bun.env, ...environment },
+      terminal: {
+        cols: 120,
+        rows: 24,
+        data(_terminal, chunk) {
+          receive(decoder.decode(chunk, { stream: true }))
+        },
+      },
+    },
+  )
+}
+
 function startInbox(): { messages: Message[]; stop: () => void; url: string } {
   const messages: Message[] = []
   const server = Bun.serve({
@@ -784,8 +1003,9 @@ function startInbox(): { messages: Message[]; stop: () => void; url: string } {
     fetch: async (request) => {
       messages.push({
         body: await request.text(),
-        from: request.headers.get("x-hummingbirds-caller-id") ?? "unknown",
-        inReplyTo: request.headers.get("x-hummingbirds-in-reply-to"),
+        from: request.headers.get("x-from") ?? "unknown",
+        inReplyTo: request.headers.get("x-in-reply-to"),
+        request: request.headers.get("x-request"),
       })
       return new Response("Accepted.", { status: 202 })
     },
@@ -806,11 +1026,16 @@ async function send(
   return fetch(bird.url, {
     method: "POST",
     headers: {
-      "x-hummingbirds-request-id": requestId,
-      ...(replyTo === undefined ? {} : { "x-hummingbirds-reply-to": replyTo }),
+      "x-request": requestId,
+      ...(replyTo === undefined ? {} : { "x-reply-to": replyTo }),
     },
     body: question,
   })
+}
+
+function opaque(label: string): string {
+  const hex = new Bun.CryptoHasher("sha256").update(label).digest("hex")
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
 }
 
 async function events(bird: Pick<Bird, "directory">): Promise<Event[]> {

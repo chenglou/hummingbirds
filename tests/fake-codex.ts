@@ -3,8 +3,8 @@
 // just enough of `codex exec --json`: it answers from the "ledger" lines in its
 // AGENTS.md, otherwise asks a peer, and remembers peers it learns about across
 // resumed sessions (stored as .fake-codex/<thread-id>.json in its workspace).
-// Like a real bird, it POSTs answers to the message's Reply-to address, asks peers
-// with its own address as Reply-to, and relays their replies to whoever asked.
+// Like a real bird, it POSTs answers to the message's x-reply-to address, asks peers
+// with its own address as x-reply-to, and relays their replies to whoever asked.
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises"
 import { join } from "path"
 
@@ -23,6 +23,11 @@ const envelope = Object.fromEntries(
     .split("\n")
     .map((line) => [line.slice(0, line.indexOf(":")), line.slice(line.indexOf(":") + 2)]),
 ) as Record<string, string | undefined>
+const inReplyTo = envelope["x-in-reply-to"]
+const requestId = envelope["x-request"]
+if (envelope["x-from"] === undefined || (inReplyTo === undefined) === (requestId === undefined)) {
+  throw new Error(`Invalid message envelope: ${message.slice(0, separator)}`)
+}
 const question = message.slice(separator + 2)
 const resumeIndex = process.argv.indexOf("resume")
 const resumedThreadId = resumeIndex < 0 ? null : (process.argv.at(-2) ?? null)
@@ -38,7 +43,6 @@ let nextItemId = 0
 
 // Like the real Codex, the final message goes nowhere; only the POSTs matter.
 let answer = ""
-const inReplyTo = envelope["Re"]
 if (inReplyTo !== undefined) {
   // A peer answered something we asked on someone's behalf: pass it along.
   if (!Object.hasOwn(session.pending, inReplyTo)) {
@@ -50,8 +54,8 @@ if (inReplyTo !== undefined) {
   if (askedBy === null) answer = question
   else await post(askedBy, question, inReplyTo)
 } else {
-  const requestId = envelope["Request"] ?? ""
-  const replyTo = envelope["Reply-to"]
+  if (requestId === undefined) throw new Error("Request is missing its correlation ID")
+  const replyTo = envelope["x-reply-to"]
   const privateAnswer = answerFromPrivateKnowledge(agents, question)
   let found: string | null = null
   if (privateAnswer !== null) {
@@ -61,11 +65,11 @@ if (inReplyTo !== undefined) {
     if (peer === undefined) throw new Error("Expected a peer")
     session.pending[requestId] = replyTo ?? null
     await post(peer.address, question, null)
-    answer = `Asked ${peer.id} about ${requestId}; waiting.`
+    answer = `Asked ${peer.id}; waiting.`
   } else {
     found = `Handled by ${nodeId}: ${question}`
   }
-  // No Reply-to means nobody is expecting an answer; the closing words only get logged.
+  // No x-reply-to means nobody is expecting an answer; the closing words only get logged.
   if (found !== null && replyTo !== undefined) await post(replyTo, found, requestId)
   else if (found !== null) answer = found
 }
@@ -100,18 +104,12 @@ async function post(address: string, body: string, inReplyTo: string | null): Pr
     method: "POST",
     headers: {
       "content-type": "text/plain; charset=utf-8",
-      "x-hummingbirds-caller-id": nodeId,
-      "x-hummingbirds-invocation-id": crypto.randomUUID(),
-      "x-hummingbirds-parent-invocation-id": Bun.env["HUMMINGBIRDS_INVOCATION_ID"] ?? "",
-      "x-hummingbirds-path": Bun.env["HUMMINGBIRDS_PATH"] ?? "[]",
-      "x-hummingbirds-reply-to": nodeAddress,
-      "x-hummingbirds-request-id": Bun.env["HUMMINGBIRDS_REQUEST_ID"] ?? "",
+      "x-from": nodeId,
+      "x-route": Bun.env["HUMMINGBIRDS_ROUTE"] ?? "[]",
+      "x-reply-to": nodeAddress,
       ...(inReplyTo === null
-        ? {}
-        : {
-            "x-hummingbirds-in-reply-to":
-              Bun.env["HUMMINGBIRDS_REQUEST_ID"] ?? inReplyTo,
-          }),
+        ? { "x-request": Bun.env["HUMMINGBIRDS_REQUEST_ID"] ?? "" }
+        : { "x-in-reply-to": Bun.env["HUMMINGBIRDS_REQUEST_ID"] ?? inReplyTo }),
     },
     body,
   })
