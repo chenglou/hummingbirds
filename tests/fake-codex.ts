@@ -5,6 +5,7 @@
 // resumed sessions (stored as .fake-codex/<thread-id>.json in its workspace).
 // Like a real bird, it POSTs answers to the message's x-reply-to address, asks peers
 // with its own address as x-reply-to, and relays their replies to whoever asked.
+import { writeFileSync } from "fs"
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises"
 import { join } from "path"
 
@@ -13,6 +14,15 @@ type Session = { peers: Peer[]; pending: Record<string, string | null>; threadId
 
 const nodeId = Bun.env["HUMMINGBIRDS_NODE_ID"] ?? ""
 const nodeAddress = Bun.env["HUMMINGBIRDS_NODE_ADDRESS"] ?? ""
+const interruptionMarker = Bun.env["HUMMINGBIRDS_FAKE_INTERRUPT_MARKER"]
+if (interruptionMarker !== undefined) {
+  await mkdir(".fake-codex", { recursive: true })
+  process.on("SIGINT", () => {
+    writeFileSync(join(".fake-codex", interruptionMarker), String(process.pid))
+    process.exit(130)
+  })
+  await writeFile(join(".fake-codex", `ready-${process.pid}`), "")
+}
 const agents = await readFile("AGENTS.md", "utf8")
 const message = await Bun.stdin.text()
 const separator = message.indexOf("\n\n")

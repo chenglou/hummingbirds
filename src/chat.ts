@@ -3,202 +3,213 @@ import { createInterface } from "readline"
 type Peer = { address: string; id: string }
 type Turn = { callerId: string; replyTo: string | null }
 
-const origin = destination(process.argv[2])
-if (process.argv.length > 3) throw new Error("Usage: bun chat [port | host:port | http(s)://host:port]")
-const address = new URL("/ask", origin).href
-const events = new URL("/events", origin).href
-const abort = new AbortController()
-const response = await fetch(events, { signal: abort.signal })
-if (!response.ok) throw new Error(`${events} returned ${response.status}`)
-if (response.body === null) throw new Error(`${events} did not provide an event stream`)
+export async function chat(target: string): Promise<void> {
+  const origin = destination(target)
+  const address = new URL("/ask", origin).href
+  const events = new URL("/events", origin).href
+  const abort = new AbortController()
+  const response = await fetch(events, { signal: abort.signal })
+  if (!response.ok) throw new Error(`${events} returned ${response.status}`)
+  if (response.body === null) throw new Error(`${events} did not provide an event stream`)
 
-const interactive = process.stdout.isTTY === true && process.stdin.isTTY === true
-const peers: Peer[] = []
-let nodeId = "bird"
-let active: Turn | null = null
+  const interactive = process.stdout.isTTY === true && process.stdin.isTTY === true
+  const peers: Peer[] = []
+  let nodeId = "bird"
+  let active: Turn | null = null
 
-const inbox = Bun.serve({
-  hostname: "127.0.0.1",
-  port: 0,
-  async fetch(request) {
-    if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
-      return new Response("POST a plain-text message to /ask", { status: 404 })
-    }
-    const incomingRequest = request.headers.get("x-request")
-    const inReplyTo = request.headers.get("x-in-reply-to")
-    if (incomingRequest !== null && inReplyTo !== null) {
-      return new Response("Send either x-request or x-in-reply-to, not both.", { status: 400 })
-    }
-    const requestId = incomingRequest ?? inReplyTo ?? crypto.randomUUID()
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
-      return new Response("Request IDs must be canonical UUIDs.", { status: 400 })
-    }
-    const question = await request.text()
-    if (question.trim() === "") return new Response("Empty message.", { status: 400 })
+  const inbox = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
+        return new Response("POST a plain-text message to /ask", { status: 404 })
+      }
+      const incomingRequest = request.headers.get("x-request")
+      const inReplyTo = request.headers.get("x-in-reply-to")
+      if (incomingRequest !== null && inReplyTo !== null) {
+        return new Response("Send either x-request or x-in-reply-to, not both.", { status: 400 })
+      }
+      const requestId = incomingRequest ?? inReplyTo ?? crypto.randomUUID()
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+        return new Response("Request IDs must be canonical UUIDs.", { status: 400 })
+      }
+      const question = await request.text()
+      if (question.trim() === "") return new Response("Empty message.", { status: 400 })
 
-    const callerId = request.headers.get("x-from") ?? "unknown"
-    render(formatMessage(callerId, question, callerId))
-    return new Response("Accepted by human.", {
-      status: 202,
-      headers: {
-        "content-type": "text/plain; charset=utf-8",
-        "x-request": requestId,
-      },
-    })
-  },
-})
-const inboxAddress = `http://127.0.0.1:${inbox.port}/ask`
-const background = 101 + Number(Bun.hash.wyhash("human") % 6n)
-const input = createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  prompt: `\x1b[30;${background}m You \x1b[0m `,
-  terminal: interactive,
-})
-
-if (interactive) {
-  input.on("SIGINT", () => input.close())
-  input.prompt()
-}
-const streaming = readEvents(response.body)
-  .then(() => {
-    if (!abort.signal.aborted) input.close()
-  })
-  .catch((error: unknown) => {
-    if (!abort.signal.aborted) {
-      console.error(error)
-      input.close()
-    }
-  })
-
-try {
-  for await (const line of input) {
-    if (line.trim() !== "") {
-      const sent = await fetch(address, {
-        method: "POST",
+      const callerId = request.headers.get("x-from") ?? "unknown"
+      render(formatMessage(callerId, question, callerId))
+      return new Response("Accepted by human.", {
+        status: 202,
         headers: {
-          "x-from": "human",
-          "x-reply-to": inboxAddress,
+          "content-type": "text/plain; charset=utf-8",
+          "x-request": requestId,
         },
-        body: line,
       })
-      if (!sent.ok) throw new Error(`${address} returned ${sent.status}: ${await sent.text()}`)
-    }
-    if (interactive) render("")
-  }
-} finally {
-  abort.abort()
-  await streaming
-  await inbox.stop(true)
-}
+    },
+  })
+  const inboxAddress = `http://127.0.0.1:${inbox.port}/ask`
+  const background = 101 + Number(Bun.hash.wyhash("human") % 6n)
+  const input = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: `\x1b[30;${background}m You \x1b[0m `,
+    terminal: interactive,
+  })
 
-async function readEvents(stream: ReadableStream<Uint8Array>): Promise<void> {
-  const decoder = new TextDecoder()
-  let pending = ""
-  for await (const chunk of stream) {
-    pending += decoder.decode(chunk, { stream: true })
-    let newline = pending.indexOf("\n")
-    while (newline >= 0) {
-      display(pending.slice(0, newline))
-      pending = pending.slice(newline + 1)
-      newline = pending.indexOf("\n")
-    }
+  if (interactive) {
+    input.on("SIGINT", () => input.close())
+    input.prompt()
   }
-  pending += decoder.decode()
-  if (pending !== "") display(pending)
-}
+  const streaming = readEvents(response.body)
+    .then(() => {
+      if (!abort.signal.aborted) input.close()
+    })
+    .catch((error: unknown) => {
+      if (!abort.signal.aborted) {
+        console.error(error)
+        input.close()
+      }
+    })
 
-function display(line: string): void {
-  if (line === "") return
-  let event: unknown
   try {
-    event = JSON.parse(line)
-  } catch {
-    return
+    for await (const line of input) {
+      if (line.trim() !== "") {
+        const sent = await fetch(address, {
+          method: "POST",
+          headers: {
+            "x-from": "human",
+            "x-reply-to": inboxAddress,
+          },
+          body: line,
+        })
+        if (!sent.ok) throw new Error(`${address} returned ${sent.status}: ${await sent.text()}`)
+      }
+      if (interactive) render("")
+    }
+  } finally {
+    abort.abort()
+    await streaming
+    await inbox.stop(true)
   }
 
-  let pretty = ""
-  if (typeof event === "object" && event !== null) {
-    if ("id" in event && typeof event.id === "string") nodeId = event.id
-    if ("kind" in event) {
-      switch (event.kind) {
-        case "received": {
-          if (!("callerId" in event) || typeof event.callerId !== "string") break
-          if ("replyTo" in event && typeof event.replyTo === "string") remember(event.callerId, event.replyTo)
-          if (event.callerId !== "human" && "question" in event && typeof event.question === "string") {
-            pretty = formatMessage(`← ${event.callerId}`, event.question)
-          }
-          break
-        }
-        case "started": {
-          if (!("callerId" in event) || typeof event.callerId !== "string") break
-          active = {
-            callerId: event.callerId,
-            replyTo: "replyTo" in event && typeof event.replyTo === "string" ? event.replyTo : null,
-          }
-          break
-        }
-        case "completed":
-        case "failed":
-          active = null
-          break
-        default:
-          break
-      }
-    } else if ("type" in event) {
-      switch (event.type) {
-        case "item.started": {
-          if (!("item" in event) || typeof event.item !== "object" || event.item === null) break
-          if (!("type" in event.item) || event.item.type !== "command_execution") break
-          if (!("command" in event.item) || typeof event.item.command !== "string") break
-          const outgoing = outgoingMessage(event.item.command)
-          if (outgoing !== null && outgoing.address !== inboxAddress) {
-            pretty = formatMessage(`→ ${outgoing.recipient}`, outgoing.message)
-          }
-          break
-        }
-        case "item.completed": {
-          if (!("item" in event) || typeof event.item !== "object" || event.item === null) break
-          if (!("type" in event.item) || event.item.type !== "agent_message") break
-          if (!("text" in event.item) || typeof event.item.text !== "string") break
-          if (event.item.text !== "") pretty = formatMessage(`${nodeId}:`, event.item.text)
-          break
-        }
-        default:
-          break
+  async function readEvents(stream: ReadableStream<Uint8Array>): Promise<void> {
+    const decoder = new TextDecoder()
+    let pending = ""
+    for await (const chunk of stream) {
+      pending += decoder.decode(chunk, { stream: true })
+      let newline = pending.indexOf("\n")
+      while (newline >= 0) {
+        display(pending.slice(0, newline))
+        pending = pending.slice(newline + 1)
+        newline = pending.indexOf("\n")
       }
     }
+    pending += decoder.decode()
+    if (pending !== "") display(pending)
   }
-  if (pretty !== "") render(pretty)
-}
 
-function remember(id: string, peerAddress: string): void {
-  if (id === "human") return
-  const known = peers.find((peer) => peer.id === id)
-  if (known === undefined) peers.push({ id, address: peerAddress })
-  else known.address = peerAddress
-}
+  function display(line: string): void {
+    if (line === "") return
+    let event: unknown
+    try {
+      event = JSON.parse(line)
+    } catch {
+      return
+    }
 
-function outgoingMessage(command: string): { address: string; recipient: string; message: string } | null {
-  let words = shellWords(command)
-  const script = words.find((word) => /(?:^|\s)(?:\S+\/)?curl\s/.test(word))
-  if (script !== undefined) words = shellWords(script)
+    let pretty = ""
+    if (typeof event === "object" && event !== null) {
+      if ("id" in event && typeof event.id === "string") nodeId = event.id
+      if ("kind" in event) {
+        switch (event.kind) {
+          case "received": {
+            if (!("callerId" in event) || typeof event.callerId !== "string") break
+            if ("replyTo" in event && typeof event.replyTo === "string") remember(event.callerId, event.replyTo)
+            if (event.callerId !== "human" && "question" in event && typeof event.question === "string") {
+              pretty = formatMessage(`← ${event.callerId}`, event.question)
+            }
+            break
+          }
+          case "started": {
+            if (!("callerId" in event) || typeof event.callerId !== "string") break
+            active = {
+              callerId: event.callerId,
+              replyTo: "replyTo" in event && typeof event.replyTo === "string" ? event.replyTo : null,
+            }
+            break
+          }
+          case "completed":
+          case "failed":
+            active = null
+            break
+          default:
+            break
+        }
+      } else if ("type" in event) {
+        switch (event.type) {
+          case "item.started": {
+            if (!("item" in event) || typeof event.item !== "object" || event.item === null) break
+            if (!("type" in event.item) || event.item.type !== "command_execution") break
+            if (!("command" in event.item) || typeof event.item.command !== "string") break
+            const outgoing = outgoingMessage(event.item.command)
+            if (outgoing !== null && outgoing.address !== inboxAddress) {
+              pretty = formatMessage(`→ ${outgoing.recipient}`, outgoing.message)
+            }
+            break
+          }
+          case "item.completed": {
+            if (!("item" in event) || typeof event.item !== "object" || event.item === null) break
+            if (!("type" in event.item) || event.item.type !== "agent_message") break
+            if (!("text" in event.item) || typeof event.item.text !== "string") break
+            if (event.item.text !== "") pretty = formatMessage(`${nodeId}:`, event.item.text)
+            break
+          }
+          default:
+            break
+        }
+      }
+    }
+    if (pretty !== "") render(pretty)
+  }
 
-  const curl = words.findIndex((word) => word === "curl" || word.endsWith("/curl"))
-  if (curl < 0) return null
-  const target = words.slice(curl + 1).find((word) => /^https?:\/\/\S+\/ask(?:\?\S*)?$/.test(word))
-  if (target === undefined) return null
-  const data = words.findIndex((word) => /^(?:--data(?:-binary|-raw)?|-d)(?:=.*)?$/.test(word))
-  const option = words[data]
-  if (option === undefined) return null
-  const separator = option.indexOf("=")
-  const message = separator < 0 ? words[data + 1] : option.slice(separator + 1)
-  if (message === undefined) return null
+  function remember(id: string, peerAddress: string): void {
+    if (id === "human") return
+    const known = peers.find((peer) => peer.id === id)
+    if (known === undefined) peers.push({ id, address: peerAddress })
+    else known.address = peerAddress
+  }
 
-  const recipient = active?.replyTo === target
-    ? active.callerId
-    : (peers.find((peer) => peer.address === target)?.id ?? target)
-  return { address: target, recipient, message }
+  function outgoingMessage(command: string): { address: string; recipient: string; message: string } | null {
+    let words = shellWords(command)
+    const script = words.find((word) => /(?:^|\s)(?:\S+\/)?curl\s/.test(word))
+    if (script !== undefined) words = shellWords(script)
+
+    const curl = words.findIndex((word) => word === "curl" || word.endsWith("/curl"))
+    if (curl < 0) return null
+    const target = words.slice(curl + 1).find((word) => /^https?:\/\/\S+\/ask(?:\?\S*)?$/.test(word))
+    if (target === undefined) return null
+    const data = words.findIndex((word) => /^(?:--data(?:-binary|-raw)?|-d)(?:=.*)?$/.test(word))
+    const option = words[data]
+    if (option === undefined) return null
+    const separator = option.indexOf("=")
+    const message = separator < 0 ? words[data + 1] : option.slice(separator + 1)
+    if (message === undefined) return null
+
+    const recipient = active?.replyTo === target
+      ? active.callerId
+      : (peers.find((peer) => peer.address === target)?.id ?? target)
+    return { address: target, recipient, message }
+  }
+
+  function render(text: string): void {
+    if (!interactive) {
+      process.stdout.write(text)
+      return
+    }
+    process.stdout.write(`\r\x1b[2K${text}`)
+    input.prompt(true)
+    process.stdout.write(input.line)
+  }
 }
 
 function shellWords(command: string): string[] {
@@ -237,18 +248,7 @@ function formatMessage(label: string, text: string, sender?: string): string {
   return `\x1b[30;${shade}m ${Bun.stripANSI(label)} \x1b[0m ${message}\n`
 }
 
-function render(text: string): void {
-  if (!interactive) {
-    process.stdout.write(text)
-    return
-  }
-  process.stdout.write(`\r\x1b[2K${text}`)
-  input.prompt(true)
-  process.stdout.write(input.line)
-}
-
-function destination(input: string | undefined): URL {
-  const requested = input ?? (Bun.env["HUMMINGBIRDS_PORT"] ?? "3000")
+function destination(requested: string): URL {
   const source = /^\d+$/.test(requested)
     ? `http://127.0.0.1:${requested}`
     : /^https?:\/\//.test(requested)

@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { basename, dirname, join, resolve } from "path"
+import { createBird } from "../src/local.ts"
 
 type Bird = {
   directory: string
@@ -133,6 +134,7 @@ describe("Hummingbirds", () => {
   test("keeps the foreground server noninteractive even in a terminal", async () => {
     const directory = join(await makeTemporaryDirectory(), "foreground")
     await mkdir(directory, { recursive: true })
+    await createBird(join(directory, "bird"), "foreground")
     const decoder = new TextDecoder()
     let output = ""
     const child = Bun.spawn([process.execPath, "run", resolve("src/server.ts")], {
@@ -141,8 +143,6 @@ describe("Hummingbirds", () => {
         ...Bun.env,
         HUMMINGBIRDS_CODEX: fakeCodex,
         HUMMINGBIRDS_DIRECTORY: join(directory, "bird"),
-        HUMMINGBIRDS_NODE_ID: "foreground",
-        HUMMINGBIRDS_PORT: "0",
       },
       terminal: {
         cols: 120,
@@ -373,22 +373,17 @@ describe("Hummingbirds", () => {
     }
   }, 15_000)
 
-  test("attaches by current port, explicit port, host, or HTTP origin", async () => {
+  test("attaches by port, host, or HTTP origin through the CLI", async () => {
     const bird = await startBird(join(await makeTemporaryDirectory(), "destinations"))
     const port = new URL(bird.url).port
-    const destinations = [undefined, port, `localhost:${port}`, `http://127.0.0.1:${port}`]
+    const destinations = [port, `localhost:${port}`, `http://127.0.0.1:${port}`]
 
     try {
       for (const [index, destination] of destinations.entries()) {
         let output = ""
-        const child = startChat(
-          bird.directory,
-          destination,
-          (chunk) => {
-            output += chunk
-          },
-          { HUMMINGBIRDS_PORT: port },
-        )
+        const child = startChat(bird.directory, destination, (chunk) => {
+          output += chunk
+        })
         const terminal = child.terminal
         if (terminal === undefined) throw new Error("Chat did not start in a terminal")
 
@@ -406,8 +401,9 @@ describe("Hummingbirds", () => {
         }
       }
 
-      const invalid = Bun.spawn([process.execPath, "run", resolve("src/chat.ts"), bird.url], {
+      const invalid = Bun.spawn([process.execPath, "run", resolve("src/cli.ts"), "chat", bird.url], {
         cwd: bird.directory,
+        env: { ...Bun.env, BIRDS_HOME: bird.directory },
         stderr: "pipe",
         stdout: "ignore",
       })
@@ -676,7 +672,7 @@ describe("Hummingbirds", () => {
   test("hatches independent blank children and grandchildren that outlive their parent", async () => {
     const root = await makeTemporaryDirectory()
     const parent = await startBird(join(root, "parent"), {
-      HUMMINGBIRDS_HATCH_MAX_BIRDS: "4",
+      HUMMINGBIRDS_HATCH_MAX_BIRDS: "5",
       HUMMINGBIRDS_SEED: "PARENT-ONLY-SECRET-71",
     })
     const inbox = startInbox()
@@ -689,7 +685,7 @@ describe("Hummingbirds", () => {
       const match = new RegExp(`^Started ${id} at (http://127\\.0\\.0\\.1:\\d+/ask)\\.$`).exec(body)
       if (match === null || match[1] === undefined) throw new Error(`Unexpected hatch response: ${body}`)
 
-      const directory = join(root, "parent", `bird-${id}`)
+      const directory = join(root, "parent", id)
       const line = (await readFile(join(directory, "stdout.jsonl"), "utf8")).split("\n")[0]
       if (line === undefined) throw new Error(`Missing startup announcement for ${id}`)
       const startup = JSON.parse(line) as { id: string; pid: number; url: string }
@@ -770,7 +766,7 @@ describe("Hummingbirds", () => {
         201,
         409,
       ])
-      const sharedDirectory = join(root, "parent", "bird-shared")
+      const sharedDirectory = join(root, "parent", "shared")
       const sharedLine = (await readFile(join(sharedDirectory, "stdout.jsonl"), "utf8")).split("\n")[0]
       if (sharedLine === undefined) throw new Error("Missing startup announcement for shared")
       const shared = JSON.parse(sharedLine) as { id: string; pid: number; url: string }
@@ -794,7 +790,7 @@ describe("Hummingbirds", () => {
       if (acceptedName === undefined) {
         await hatch(parent.url, "last-retry")
       } else {
-        const acceptedDirectory = join(root, "parent", `bird-${acceptedName}`)
+        const acceptedDirectory = join(root, "parent", acceptedName)
         const acceptedLine = (await readFile(join(acceptedDirectory, "stdout.jsonl"), "utf8")).split(
           "\n",
         )[0]
@@ -808,7 +804,7 @@ describe("Hummingbirds", () => {
         body: "overflow",
       })
       expect(overflow.status).toBe(429)
-      expect(await readdir(join(root, "parent"))).not.toContain("bird-overflow")
+      expect(await readdir(join(root, "parent"))).not.toContain("overflow")
 
       await Promise.all([
         ask(parent.url, "parent message", "q-parent"),
@@ -964,15 +960,23 @@ async function startBird(
   port = 0,
 ): Promise<Bird> {
   await mkdir(directory, { recursive: true })
+  const stateDirectory = join(directory, "bird")
+  if (!(await Bun.file(join(stateDirectory, "bird.json")).exists())) {
+    const peers = environment["HUMMINGBIRDS_PEERS"]
+    const seed = environment["HUMMINGBIRDS_SEED"]
+    await createBird(stateDirectory, basename(directory), {
+      ...(port === 0 ? {} : { port }),
+      ...(peers === undefined ? {} : { peers }),
+      ...(seed === undefined ? {} : { seed }),
+    })
+  }
   const child = Bun.spawn([process.execPath, "run", resolve("src/server.ts")], {
     cwd: directory,
     env: {
       ...Bun.env,
       HUMMINGBIRDS_CODEX: fakeCodex,
-      HUMMINGBIRDS_DIRECTORY: join(directory, "bird"),
-      HUMMINGBIRDS_NODE_ID: basename(directory),
+      HUMMINGBIRDS_DIRECTORY: stateDirectory,
       ...environment,
-      HUMMINGBIRDS_PORT: String(port),
     },
     stdin: "ignore",
     stdout: "pipe",
@@ -1000,16 +1004,15 @@ async function startBird(
 
 function startChat(
   directory: string,
-  destination: string | undefined,
+  destination: string,
   receive: (chunk: string) => void,
-  environment: Record<string, string> = {},
 ) {
   const decoder = new TextDecoder()
   return Bun.spawn(
-    [process.execPath, "run", resolve("src/chat.ts"), ...(destination === undefined ? [] : [destination])],
+    [process.execPath, "run", resolve("src/cli.ts"), "chat", destination],
     {
       cwd: directory,
-      env: { ...Bun.env, ...environment },
+      env: { ...Bun.env, BIRDS_HOME: directory },
       terminal: {
         cols: 120,
         rows: 24,

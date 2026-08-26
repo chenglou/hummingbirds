@@ -2,80 +2,76 @@
 
 A flock of decentralized Codex birds talking to each other, discovering new birds, shedding old ones, and growing & hatching new birds
 
-## Start a bird
+## Install and start
 
 ```sh
 bun install
-bun run --bun codex login # On a remote server, use `bun run --bun codex login --device-auth` instead and finish signing in from your own browser.
-bun start # starts the server that serves one Codex bird
+bun link
+birds login
+birds new a
+birds start a
 ```
 
-To chat with a bird:
+`bun link` makes this checkout's `birds` command available globally. Codex is a pinned dependency; no separate Codex or Node installation is needed. On a remote server, use `birds login --device-auth` and finish signing in from your own browser.
+
+On Linux, install `bubblewrap`; Ubuntu 24.04 may also require the [documented AppArmor setup](https://learn.chatgpt.com/docs/sandboxing#prerequisites).
+
+This uses the Codex you're used to, plus a thin prompt to make it understand it's one bird of a flock.
+
+`birds start` stays in the foreground and prints the raw event stream. In another terminal:
 
 ```sh
-bun chat
+birds chat a
 ```
 
-This reuses the existing Codex you're used to, plus a very very thin prompt to make it understand it's one bird of a flock.
-To talk to a different bird, pass its port, host and port, or URL:
+Chat shows messages without raw logs. Local names, ports, and HTTP origins work:
 
 ```sh
-bun chat 3001 # this assumes your local machine has another bird running at 3001
-bun chat localhost:3001 # same
-bun chat http://someWebsite.com # assuming they host their birds at that url
+birds chat a
+birds chat 3001
+birds chat http://localhost:3001
 ```
 
-The birds will chat among themselves using the same method. In that sense, they see you as just another bird too.
+The birds use the same HTTP message protocol among themselves. In that sense, they see you as just another bird too. Messages are accepted immediately; actual replies arrive later as new messages.
 
-`bun chat` currently expects a local bird: its reply inbox is bound to localhost.
+The server and chat inbox currently bind to localhost. To use a bird on a remote server, SSH there and run `birds chat <id>` on that machine. Cross-machine flocks aren't supported yet.
 
-You can also send a message with curl:
+## Manage local birds
 
 ```sh
-curl localhost:3000/ask -d "What do you know about Ben?"
+birds new b --peer a
+birds start b --detach
+birds list
+birds stop b
+birds start b
 ```
 
-HTTP messages are accepted immediately. The bird's prompt, conversation ID, and event log stay in the ignored `bird/` directory, so restarting resumes the same bird.
+`new` creates a fresh bird without starting it. Repeat `--peer <local-id>` to give it starting peers; `--port 3001` chooses a specific port. Otherwise a free port is chosen and saved for future starts.
 
-## Run several birds
+`stop` rejects new work and finishes already-accepted messages before exiting. `kill` interrupts work immediately. Neither deletes saved memory; interrupted or queued messages can be lost when killed.
 
-Each instance is an ordinary copy of `package.json`, `bun.lock`, and `src/`:
+Known Linux limitation: `kill` can leave a running Codex tool subprocess behind; prefer `stop` for now.
 
-```sh
-for bird in a b c; do
-  mkdir -p "temp/$bird"
-  cp -R package.json bun.lock src "temp/$bird/"
-done
-```
+Each bird lives in `~/.birds/<id>/`; set `BIRDS_HOME` to use another local flock. The directory holds its identity and port (`bird.json`), prompt (`workspace/AGENTS.md`), conversation ID (`thread-id`), and event log (`events.jsonl`). Detached output is appended to `stdout.jsonl`.
 
-Give each copy a `.env` with its own identity, port, and starting peers:
+Codex stores the conversation itself locally under `~/.codex/` (or `CODEX_HOME`). The thread ID alone cannot recover it if that data is lost. To preserve memory, securely back up both the bird directories and Codex home; the latter also contains login credentials.
 
-```dotenv
-HUMMINGBIRDS_NODE_ID=a
-HUMMINGBIRDS_PORT=3001
-HUMMINGBIRDS_PEERS="- b at http://127.0.0.1:3002/ask"
-```
-
-Run `bun install --frozen-lockfile` in each copy. Instances running as the same OS user reuse the Codex login. `HUMMINGBIRDS_CODEX` can override the bundled CLI with another executable when needed.
-
-Start each independently, in its own terminal:
-
-```sh
-cd temp/a && bun start
-cd temp/b && bun start
-cd temp/c && bun start
-```
-
-Attach to any bird with `bun chat 3001`, or send it a message over HTTP:
+You can also POST plain text to an address from `birds list`:
 
 ```sh
 curl localhost:3001/ask -d "Ask your peers what Ben likes."
 ```
 
-Birds send plain-text messages to one another and return immediately. Replies arrive later as new messages. There is no flock manager; the models decide what to ask, remember, and pass along.
+Bare curl receives an acknowledgement, not the bird's eventual answer; use `birds chat` for a reply inbox.
 
-A bird can also hatch another independent bird through its own local `/hatch` endpoint. Each child has its own ignored `bird-<id>/` directory, starts with a fresh conversation, and learns through ordinary messages. `HUMMINGBIRDS_HATCH_MAX_BIRDS` limits each local flock to 32 children by default.
+There is no manager daemon or global bird directory. `list` only inspects the birds stored locally; the models decide what to ask, remember, and pass along.
 
-The bird server is [src/server.ts](src/server.ts), the terminal client is [src/chat.ts](src/chat.ts), and bird instructions come from [src/prompt_template.md](src/prompt_template.md). Resuming a bird also requires the same Codex home, which stores the conversation.
+A bird can hatch another through its own `/hatch` endpoint. This uses the same creation and startup code as the CLI. The child has a fresh conversation, knows its parent as a peer, and runs independently. `HUMMINGBIRDS_HATCH_MAX_BIRDS` caps local hatching at 32 birds, including existing birds.
 
-Open directions are in [experiments/ideas.md](experiments/ideas.md). Run `bun run check` and `bun run knip` for deterministic verification.
+For initial knowledge and other peer addresses, `new` also accepts `HUMMINGBIRDS_SEED` and `HUMMINGBIRDS_PEERS` from the environment. `HUMMINGBIRDS_CODEX` overrides the packaged CLI; `HUMMINGBIRDS_CODEX_ARGS` supplies extra Codex flags at startup.
+
+## Development
+
+Without a global link, use `bun run birds <command>` in this checkout. `bun start a` and `bun chat a` are shortcuts. Existing copied instances aren't imported or modified automatically.
+
+Run `bun run check` and `bun run knip` for deterministic verification. Open directions are in [experiments/ideas.md](experiments/ideas.md).

@@ -1,21 +1,16 @@
 // One bird: an HTTP server that hands each message to a persistent Codex
-// conversation. `bun start` keeps its directory in bird/, which holds:
+// conversation. Each independently managed bird directory holds:
+//   bird.json     its durable identity and listening port
+//   run.json      the current process's private lifecycle-control token
 //   thread-id     the Codex conversation to resume (created on the first message)
 //   events.jsonl  a log of every message, for inspection only
 //   workspace/    Codex's working directory, where AGENTS.md tells the bird who it is
 // Nobody waits on the line: a message is acknowledged at once, the turn runs in its
 // own time, and the bird POSTs whatever it has to say to the message's x-reply-to address.
-import {
-  appendFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmdirSync,
-  writeFileSync,
-} from "fs"
+import { appendFileSync, renameSync, unlinkSync, writeFileSync } from "fs"
 import { rename } from "fs/promises"
-import { basename, dirname, join, resolve } from "path"
+import { dirname, join, resolve } from "path"
+import { birdDirectory, codexCommand, createBird, readBird, startBird } from "./local"
 
 const headers = {
   callerId: "x-from",
@@ -41,11 +36,8 @@ type Event =
   | { kind: "completed"; threadId: string }
 
 const directory = resolve(Bun.env["HUMMINGBIRDS_DIRECTORY"] ?? "bird")
-const nodeId = Bun.env["HUMMINGBIRDS_NODE_ID"] ?? basename(directory)
-const executable = Bun.env["HUMMINGBIRDS_CODEX"]
-const codex = executable === undefined
-  ? [process.execPath, require.resolve("@openai/codex/bin/codex.js")]
-  : [executable]
+const bird = readBird(directory)
+const nodeId = bird.id
 const hatchMaxBirds = Number(Bun.env["HUMMINGBIRDS_HATCH_MAX_BIRDS"] ?? 32)
 if (!Number.isSafeInteger(hatchMaxBirds) || hatchMaxBirds < 1) {
   throw new Error("HUMMINGBIRDS_HATCH_MAX_BIRDS must be a positive integer")
@@ -63,16 +55,23 @@ const threadIdPath = join(directory, "thread-id")
 const eventsPath = join(directory, "events.jsonl")
 const subscribers: ReadableStreamDefaultController<Uint8Array>[] = []
 const encoder = new TextEncoder()
+const failureAbort = new AbortController()
 let queue: Promise<unknown> = Promise.resolve()
-
-mkdirSync(workspace, { recursive: true })
+let hatches: Promise<unknown> = Promise.resolve()
+let stopping = false
+let forced = false
+let active: { pid: number } | null = null
+const token = crypto.randomUUID()
+const runPath = join(directory, "run.json")
 
 const server = Bun.serve({
   hostname: "127.0.0.1",
   idleTimeout: 0,
-  port: Number(Bun.env["HUMMINGBIRDS_PORT"] ?? 3000),
+  port: bird.port,
   fetch: (request) => {
     switch (new URL(request.url).pathname) {
+      case "/control":
+        return control(request)
       case "/events":
         return request.method === "GET"
           ? streamEvents()
@@ -85,20 +84,58 @@ const server = Bun.serve({
   },
 })
 const address = `http://127.0.0.1:${server.port}/ask`
-const agentsPath = join(workspace, "AGENTS.md")
-if (!existsSync(agentsPath)) {
-  const prompt = readFileSync(join(import.meta.dir, "prompt_template.md"), "utf8")
-  writeFileSync(
-    agentsPath,
-    prompt
-      .replaceAll("[id]", nodeId)
-      .replaceAll("[address]", address)
-      .replaceAll("[peers]", Bun.env["HUMMINGBIRDS_PEERS"] ?? "(none)")
-      .replaceAll("[seed]", Bun.env["HUMMINGBIRDS_SEED"] ?? "(none)"),
-  )
-}
+writeFileSync(`${runPath}.tmp`, JSON.stringify({ pid: process.pid, token }), { mode: 0o600 })
+renameSync(`${runPath}.tmp`, runPath)
 const startup = `${JSON.stringify({ id: nodeId, pid: process.pid, url: address })}\n`
 emit(startup)
+
+process.on("SIGINT", () => shutdown(false))
+process.on("SIGTERM", () => shutdown(false))
+
+async function control(request: Request): Promise<Response> {
+  if (request.headers.get("authorization") !== `Bearer ${token}`) {
+    return new Response("Unauthorized.", { status: 401 })
+  }
+  switch (request.method) {
+    case "GET":
+      return new Response(stopping ? "stopping" : "running")
+    case "POST": {
+      const action = await request.text()
+      if (action !== "stop" && action !== "kill") {
+        return new Response("Send stop or kill.", { status: 400 })
+      }
+      setTimeout(() => shutdown(action === "kill"), 0)
+      return new Response("Stopping.", { status: 202 })
+    }
+    default:
+      return new Response("GET or POST /control", { status: 405 })
+  }
+}
+
+function shutdown(force: boolean): void {
+  if (force && !forced) {
+    forced = true
+    failureAbort.abort()
+    if (active !== null) {
+      try {
+        // Ask Codex to cancel its tools; see the Linux cleanup limitation in todo.md.
+        process.kill(active.pid, "SIGINT")
+      } catch {
+        // A Codex process may have finished just before the stop request arrived.
+      }
+    }
+  }
+  if (stopping) return
+  stopping = true
+  void Promise.all([queue, hatches]).finally(finishShutdown)
+}
+
+function finishShutdown(): void {
+  for (const subscriber of subscribers) subscriber.close()
+  subscribers.length = 0
+  unlinkSync(runPath)
+  void server.stop(true)
+}
 
 function streamEvents(): Response {
   let subscriber: ReadableStreamDefaultController<Uint8Array>
@@ -124,75 +161,56 @@ function emit(line: string): void {
   for (const subscriber of subscribers) subscriber.enqueue(bytes)
 }
 
+function isStopping(): boolean {
+  return stopping
+}
+
 async function hatch(request: Request): Promise<Response> {
   if (request.method !== "POST") {
     return new Response("POST a plain-text bird ID to /hatch", { status: 405 })
   }
+  if (stopping) return new Response("Bird is stopping.", { status: 503 })
   const id = (await request.text()).trim()
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(id)) {
+  if (isStopping()) return new Response("Bird is stopping.", { status: 503 })
+  let childDirectory: string
+  try {
+    childDirectory = birdDirectory(id, dirname(directory))
+  } catch {
     return new Response("Bird ID must contain only letters, numbers, underscores, or hyphens.", {
       status: 400,
     })
   }
-  const flockDirectory = dirname(directory)
-  const childDirectory = join(flockDirectory, `bird-${id}`)
-  // Reserve before counting so concurrent birds cannot both keep the last slot.
+  // An unfinished upload has not been accepted. Only completed bodies join the
+  // lifecycle drain, so a slow sender cannot prevent a bird from stopping.
+  const response = hatchBird(childDirectory, id)
+  hatches = Promise.all([hatches, response]).then(() => {})
+  return response
+}
+
+async function hatchBird(childDirectory: string, id: string): Promise<Response> {
   try {
-    mkdirSync(childDirectory)
+    const child = await createBird(childDirectory, id, {
+      maxBirds: hatchMaxBirds,
+      peers: `- ${nodeId} at ${address}`,
+    })
+    await startBird(child, true)
+    return new Response(`Started ${child.id} at http://127.0.0.1:${child.port}/ask.`, { status: 201 })
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "EEXIST") {
       return new Response("Bird ID already exists.", { status: 409 })
     }
-    throw error
-  }
-  const births = readdirSync(flockDirectory, { withFileTypes: true }).filter(
-    (entry) => entry.isDirectory() && entry.name.startsWith("bird-"),
-  ).length
-  if (births > hatchMaxBirds) {
-    rmdirSync(childDirectory)
-    return new Response("Local bird limit reached.", { status: 429 })
-  }
-
-  const outputPath = join(childDirectory, "stdout.jsonl")
-  const child = Bun.spawn([process.execPath, import.meta.path], {
-    cwd: process.cwd(),
-    detached: true,
-    env: {
-      ...process.env,
-      HUMMINGBIRDS_DIRECTORY: childDirectory,
-      HUMMINGBIRDS_NODE_ID: id,
-      HUMMINGBIRDS_PEERS: `- ${nodeId} at ${address}`,
-      HUMMINGBIRDS_PORT: "0",
-      HUMMINGBIRDS_SEED: "(none)",
-    },
-    stdin: "ignore",
-    stdout: Bun.file(outputPath),
-    stderr: "ignore",
-  })
-  child.unref()
-
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    if (existsSync(outputPath)) {
-      const text = readFileSync(outputPath, "utf8")
-      const newline = text.indexOf("\n")
-      if (newline >= 0) {
-        const started = JSON.parse(text.slice(0, newline)) as { id: string; url: string }
-        return new Response(`Started ${started.id} at ${started.url}.`, { status: 201 })
-      }
+    if (error instanceof Error && error.message === "Local bird limit reached.") {
+      return new Response(error.message, { status: 429 })
     }
-    if (child.exitCode !== null) {
-      return new Response("Bird exited before starting.", { status: 500 })
-    }
-    await Bun.sleep(10)
+    return new Response(error instanceof Error ? error.message : String(error), { status: 500 })
   }
-  child.kill()
-  return new Response("Bird did not start in time.", { status: 500 })
 }
 
 async function handleRequest(request: Request): Promise<Response> {
   if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
     return new Response("POST a plain-text message to /ask", { status: 404 })
   }
+  if (stopping) return new Response("Bird is stopping.", { status: 503 })
   const incomingRequest = request.headers.get(headers.requestId)
   const inReplyTo = request.headers.get(headers.inReplyTo)
   if (incomingRequest !== null && inReplyTo !== null) {
@@ -216,6 +234,7 @@ async function handleRequest(request: Request): Promise<Response> {
     requestId,
   }
   const question = await request.text()
+  if (isStopping()) return new Response("Bird is stopping.", { status: 503 })
   record(context, { kind: "received", question })
   // Usually a reply whose body never made it into curl; better to hear about it now.
   if (question.trim() === "") return reject(400, "Empty message.", context)
@@ -226,27 +245,26 @@ async function handleRequest(request: Request): Promise<Response> {
     return reject(409, `Cycle rejected at ${nodeId}.`, context)
   }
 
-  void runTurn(question, context)
+  enqueueTurn(question, context)
   return reply(202, `Accepted by ${nodeId}.`, context)
 }
 
-async function runTurn(question: string, context: Context): Promise<void> {
+function enqueueTurn(question: string, context: Context): void {
   // One Codex turn at a time: the conversation is a single thread.
-  const turn = queue.then(() => ask(question, context))
-  queue = turn.catch(() => {})
-  try {
-    const threadId = await turn
-    record(context, { kind: "completed", threadId })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    // Nobody saw the turn fail, so tell the asker the same way the bird itself would
-    // have, then put it on record. A failed reply turn owes nobody anything, and not
-    // reporting it is what keeps two failing birds from bouncing reports forever.
-    if (context.inReplyTo === null && context.replyTo !== null) {
-      await reportFailure(context.replyTo, message, context)
+  queue = queue.then(async () => {
+    if (forced) return
+    try {
+      const threadId = await ask(question, context)
+      record(context, { kind: "completed", threadId })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      // A failed reply owes nobody anything; skipping it prevents failure loops.
+      if (context.inReplyTo === null && context.replyTo !== null) {
+        await reportFailure(context.replyTo, message, context)
+      }
+      record(context, { kind: "failed", error: message })
     }
-    record(context, { kind: "failed", error: message })
-  }
+  })
 }
 
 async function reportFailure(replyTo: string, message: string, context: Context): Promise<void> {
@@ -260,6 +278,7 @@ async function reportFailure(replyTo: string, message: string, context: Context)
       [headers.replyTo]: address,
     },
     body: message,
+    signal: failureAbort.signal,
   }).catch(() => {})
 }
 
@@ -286,8 +305,10 @@ async function ask(question: string, context: Context): Promise<string> {
     threadId === null
       ? ["--search", "exec", ...common, ...codexArgs, "-"]
       : ["--search", "exec", "resume", ...common, ...codexArgs, threadId, "-"]
-  const child = Bun.spawn([...codex, ...args], {
+  if (forced) throw new Error("Bird was killed.")
+  const child = Bun.spawn([...codexCommand, ...args], {
     cwd: workspace,
+    detached: true,
     env: {
       ...process.env,
       HUMMINGBIRDS_NODE_ADDRESS: address,
@@ -299,11 +320,13 @@ async function ask(question: string, context: Context): Promise<string> {
     stdout: "pipe",
     stderr: "ignore",
   })
+  active = child
   record(context, { kind: "started", codexPid: child.pid, threadId })
   const [startedThreadId, exitCode] = await Promise.all([
     readCodexOutput(child.stdout),
     child.exited,
   ])
+  active = null
 
   if (threadId === null && startedThreadId !== null) {
     await Bun.write(`${threadIdPath}.tmp`, startedThreadId)

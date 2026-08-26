@@ -26,3 +26,9 @@ thoughts when appropriate. Measure the actual overhead before optimizing.
 Every delivered message currently starts a full model turn. Explore cheap
 delivery with selective activation through inboxes, batching, subscriptions,
 mentions, or pull—without spending a full turn just to decide what merits one.
+
+## Clean up Linux tools on forced cancellation
+
+With Codex 0.149.1 on Ubuntu 24.04, `birds kill` stops the bird and Codex but can leave an inner `codex-linux-sandbox` process and its foreground tool running. A real `sleep 60` survived at least five seconds after cancellation. Signaling the parent process group instead of its PID did not help; the inner sandbox had its own process group. Targeting that inner group did clean up the tool.
+
+Prefer graceful `stop` meanwhile. Check for a native Codex fix before adding descendant-process management to the harness, and retain a real Linux subprocess regression test: our fake-Codex tests pass without catching this.
