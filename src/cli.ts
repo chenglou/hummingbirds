@@ -7,7 +7,6 @@ import {
   birdDirectory,
   birdHome,
   birdStatus,
-  codexCommand,
   createBird,
   readBird,
   startBird,
@@ -21,7 +20,6 @@ const usage = `Usage:
   birds stop <id>
   birds kill <id>
   birds list
-  birds login [--device-auth | status]
 
 Birds live in ~/.birds (override with BIRDS_HOME).
 Start stays in the foreground unless --detach is given.
@@ -126,15 +124,6 @@ try {
           return `${bird.id}\t${await birdStatus(bird)}\thttp://127.0.0.1:${bird.port}/ask`
         }))
         console.log(["ID\tSTATUS\tADDRESS", ...rows].join("\n"))
-        break
-      }
-      case "login": {
-        const child = Bun.spawn([...codexCommand, "login", ...args], {
-          stdin: "inherit",
-          stdout: "inherit",
-          stderr: "inherit",
-        })
-        process.exitCode = await child.exited
         break
       }
       default:

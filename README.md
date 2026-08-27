@@ -7,12 +7,12 @@ A flock of decentralized Codex birds talking to each other, discovering new bird
 ```sh
 bun install
 bun link
-birds login
+bun run --bun codex login
 birds new a
 birds start a
 ```
 
-`bun link` makes this checkout's `birds` command available globally. Codex is a pinned dependency; no separate Codex or Node installation is needed. On a remote server, use `birds login --device-auth` and finish signing in from your own browser.
+`bun link` makes this checkout's `birds` command available globally. Codex is a pinned dependency; no separate Codex or Node installation is needed. On a remote server, run `bun run --bun codex login --device-auth` from this checkout and finish signing in from your own browser.
 
 On Linux, install `bubblewrap`; Ubuntu 24.04 may also require the [documented AppArmor setup](https://learn.chatgpt.com/docs/sandboxing#prerequisites).
 
@@ -73,5 +73,3 @@ For initial knowledge and other peer addresses, `new` also accepts `HUMMINGBIRDS
 ## Development
 
 Without a global link, use `bun run birds <command>` in this checkout. `bun start a` and `bun chat a` are shortcuts. Existing copied instances aren't imported or modified automatically.
-
-Run `bun run check` and `bun run knip` for deterministic verification. Open directions are in [experiments/ideas.md](experiments/ideas.md).
