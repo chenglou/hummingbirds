@@ -311,10 +311,11 @@ async function ask(question: string, context: Context): Promise<string> {
     detached: true,
     env: {
       ...process.env,
-      HUMMINGBIRDS_NODE_ADDRESS: address,
-      HUMMINGBIRDS_NODE_ID: nodeId,
       HUMMINGBIRDS_ROUTE: JSON.stringify(outgoingPath(context)),
-      HUMMINGBIRDS_REQUEST_ID: undefined, // Don't inherit a stale ID from a parent process.
+      // Don't inherit removed messaging aliases from a parent process.
+      HUMMINGBIRDS_NODE_ADDRESS: undefined,
+      HUMMINGBIRDS_NODE_ID: undefined,
+      HUMMINGBIRDS_REQUEST_ID: undefined,
     },
     stdin: new Blob([envelope(question, context)]),
     stdout: "pipe",

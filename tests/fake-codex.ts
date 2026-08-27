@@ -12,10 +12,8 @@ import { join } from "path"
 type Peer = { address: string; id: string }
 type Session = { peers: Peer[]; pending: Record<string, string | null>; threadId: string }
 
-const nodeId = Bun.env["HUMMINGBIRDS_NODE_ID"] ?? ""
-const nodeAddress = Bun.env["HUMMINGBIRDS_NODE_ADDRESS"] ?? ""
-if (Bun.env["HUMMINGBIRDS_REQUEST_ID"] !== undefined) {
-  throw new Error("Request IDs must come from the message envelope, not the environment")
+for (const name of ["HUMMINGBIRDS_NODE_ID", "HUMMINGBIRDS_NODE_ADDRESS", "HUMMINGBIRDS_REQUEST_ID"]) {
+  if (Bun.env[name] !== undefined) throw new Error(`${name} must not be injected into Codex`)
 }
 const interruptionMarker = Bun.env["HUMMINGBIRDS_FAKE_INTERRUPT_MARKER"]
 if (interruptionMarker !== undefined) {
@@ -27,6 +25,12 @@ if (interruptionMarker !== undefined) {
   await writeFile(join(".fake-codex", `ready-${process.pid}`), "")
 }
 const agents = await readFile("AGENTS.md", "utf8")
+const identity = /^Your ID is ([A-Za-z0-9_-]+), and your address is (https?:\/\/\S+)\.$/m.exec(agents)
+if (identity === null || identity[1] === undefined || identity[2] === undefined) {
+  throw new Error("AGENTS.md must specify the bird's own ID and address")
+}
+const nodeId = identity[1]
+const nodeAddress = identity[2]
 const message = await Bun.stdin.text()
 const separator = message.indexOf("\n\n")
 if (separator < 0) throw new Error(`Message without an envelope: ${message}`)

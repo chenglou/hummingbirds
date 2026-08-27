@@ -53,6 +53,8 @@ describe("Hummingbirds", () => {
       expect(agents).not.toContain("[peers]")
       expect(agents).not.toContain("parent-invocation-id")
       expect(agents).not.toContain("HUMMINGBIRDS_REQUEST_ID")
+      expect(agents).not.toContain("HUMMINGBIRDS_NODE_ID")
+      expect(agents).not.toContain("HUMMINGBIRDS_NODE_ADDRESS")
 
       const eventResponse = await fetch(new URL("/events", bird.url))
       expect(eventResponse.headers.get("content-type")).toContain("application/x-ndjson")
@@ -563,10 +565,14 @@ describe("Hummingbirds", () => {
     const source = await startBird(join(root, "source"), {
       HUMMINGBIRDS_SEED: "- Tideglass trial Nacre-A records the exact phrase “Opaque Harbor-17.”",
       HUMMINGBIRDS_REQUEST_ID: opaque("stale-inherited-request"),
+      HUMMINGBIRDS_NODE_ID: "stale-parent",
+      HUMMINGBIRDS_NODE_ADDRESS: "http://127.0.0.1:1/ask",
     })
     const receiver = await startBird(join(root, "receiver"), {
       HUMMINGBIRDS_PEERS: `- source at ${source.url}`,
       HUMMINGBIRDS_REQUEST_ID: opaque("stale-inherited-request"),
+      HUMMINGBIRDS_NODE_ID: "stale-parent",
+      HUMMINGBIRDS_NODE_ADDRESS: "http://127.0.0.1:1/ask",
     })
     const inbox = startInbox()
     const requestId = opaque("opaque-visible-request")
@@ -611,9 +617,15 @@ describe("Hummingbirds", () => {
       })
       expect(inbox.messages[0]?.inReplyTo).toBe(requestId)
       expect(inbox.messages[0]?.request).toBeNull()
-      expect((await events(source)).find((event) => event.kind === "received")?.requestId).toBe(
-        requestId,
+      expect(inbox.messages[0]?.from).toBe(receiver.id)
+      expect(received(await events(source), requestId)).toEqual([
+        [receiver.id, receiver.url, null, [receiver.id]],
+      ])
+      const reply = (await events(receiver)).find(
+        (event) => event.kind === "received" && event.inReplyTo === requestId,
       )
+      expect(reply?.callerId).toBe(source.id)
+      expect(reply?.replyTo).toBe(source.url)
 
       for (const [bird, field] of [
         [source, "x-request"],
@@ -677,6 +689,8 @@ describe("Hummingbirds", () => {
     const parent = await startBird(join(root, "parent"), {
       HUMMINGBIRDS_HATCH_MAX_BIRDS: "5",
       HUMMINGBIRDS_SEED: "PARENT-ONLY-SECRET-71",
+      HUMMINGBIRDS_NODE_ID: "stale-parent",
+      HUMMINGBIRDS_NODE_ADDRESS: "http://127.0.0.1:1/ask",
     })
     const inbox = startInbox()
     const descendants: { directory: string; id: string; pid: number; url: string }[] = []
