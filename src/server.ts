@@ -22,7 +22,7 @@ const headers = {
 
 type Context = {
   callerId: string
-  inReplyTo: string | null
+  messageKind: "request" | "reply"
   invocationId: string
   path: string[]
   replyTo: string | null
@@ -227,7 +227,7 @@ async function handleRequest(request: Request): Promise<Response> {
   }
   const context: Context = {
     callerId: request.headers.get(headers.callerId) ?? "human",
-    inReplyTo,
+    messageKind: inReplyTo === null ? "request" : "reply",
     invocationId,
     path,
     replyTo: request.headers.get(headers.replyTo),
@@ -241,7 +241,7 @@ async function handleRequest(request: Request): Promise<Response> {
   // A message with no x-reply-to is fine: it may just share a fact or request an action.
   // A question that already went through this bird is a cycle; nothing else would
   // stop it going round forever. A reply is not a question, so its path is fine.
-  if (inReplyTo === null && context.path.includes(nodeId)) {
+  if (context.messageKind === "request" && context.path.includes(nodeId)) {
     return reject(409, `Cycle rejected at ${nodeId}.`, context)
   }
 
@@ -259,7 +259,7 @@ function enqueueTurn(question: string, context: Context): void {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // A failed reply owes nobody anything; skipping it prevents failure loops.
-      if (context.inReplyTo === null && context.replyTo !== null) {
+      if (context.messageKind === "request" && context.replyTo !== null) {
         await reportFailure(context.replyTo, message, context)
       }
       record(context, { kind: "failed", error: message })
@@ -386,7 +386,7 @@ async function readCodexOutput(stream: ReadableStream<Uint8Array>): Promise<stri
 // took from here, so pick up where this bird left off instead of appending the return
 // leg: a follow-up to a contributor is not a cycle.
 function outgoingPath(context: Context): string[] {
-  const self = context.inReplyTo === null ? -1 : context.path.indexOf(nodeId)
+  const self = context.messageKind === "request" ? -1 : context.path.indexOf(nodeId)
   return [...(self < 0 ? context.path : context.path.slice(0, self)), nodeId]
 }
 
@@ -395,17 +395,18 @@ function outgoingPath(context: Context): string[] {
 function envelope(question: string, context: Context): string {
   const lines = [
     `${headers.callerId}: ${context.callerId}`,
-    context.inReplyTo === null
-      ? `${headers.requestId}: ${context.requestId}`
-      : `${headers.inReplyTo}: ${context.inReplyTo}`,
+    `${context.messageKind === "request" ? headers.requestId : headers.inReplyTo}: ${context.requestId}`,
   ]
   if (context.replyTo !== null) lines.push(`${headers.replyTo}: ${context.replyTo}`)
   return `${lines.join("\n")}\n\n${question}`
 }
 
 function record(context: Context, event: Event): void {
+  const { messageKind, ...metadata } = context
   const { kind, ...details } = event
-  const line = `${JSON.stringify({ ...context, ...details, at: Date.now(), kind })}\n`
+  // Preserve the event format without keeping a second copy of the ID in memory.
+  const inReplyTo = messageKind === "reply" ? context.requestId : null
+  const line = `${JSON.stringify({ ...metadata, inReplyTo, ...details, at: Date.now(), kind })}\n`
   appendFileSync(eventsPath, line)
   emit(line)
 }
