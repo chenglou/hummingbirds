@@ -52,6 +52,7 @@ describe("Hummingbirds", () => {
       expect(agents).toContain(`Your ID is bird, and your address is ${bird.url}.`)
       expect(agents).not.toContain("[peers]")
       expect(agents).not.toContain("parent-invocation-id")
+      expect(agents).not.toContain("HUMMINGBIRDS_REQUEST_ID")
 
       const eventResponse = await fetch(new URL("/events", bird.url))
       expect(eventResponse.headers.get("content-type")).toContain("application/x-ndjson")
@@ -561,9 +562,11 @@ describe("Hummingbirds", () => {
     const root = await makeTemporaryDirectory()
     const source = await startBird(join(root, "source"), {
       HUMMINGBIRDS_SEED: "- Tideglass trial Nacre-A records the exact phrase “Opaque Harbor-17.”",
+      HUMMINGBIRDS_REQUEST_ID: opaque("stale-inherited-request"),
     })
     const receiver = await startBird(join(root, "receiver"), {
       HUMMINGBIRDS_PEERS: `- source at ${source.url}`,
+      HUMMINGBIRDS_REQUEST_ID: opaque("stale-inherited-request"),
     })
     const inbox = startInbox()
     const requestId = opaque("opaque-visible-request")

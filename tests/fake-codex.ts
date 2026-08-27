@@ -14,6 +14,9 @@ type Session = { peers: Peer[]; pending: Record<string, string | null>; threadId
 
 const nodeId = Bun.env["HUMMINGBIRDS_NODE_ID"] ?? ""
 const nodeAddress = Bun.env["HUMMINGBIRDS_NODE_ADDRESS"] ?? ""
+if (Bun.env["HUMMINGBIRDS_REQUEST_ID"] !== undefined) {
+  throw new Error("Request IDs must come from the message envelope, not the environment")
+}
 const interruptionMarker = Bun.env["HUMMINGBIRDS_FAKE_INTERRUPT_MARKER"]
 if (interruptionMarker !== undefined) {
   await mkdir(".fake-codex", { recursive: true })
@@ -62,7 +65,7 @@ if (inReplyTo !== undefined) {
   delete session.pending[inReplyTo]
   learnContributors(session.peers, question)
   if (askedBy === null) answer = question
-  else await post(askedBy, question, inReplyTo)
+  else await post(askedBy, question, { "x-in-reply-to": inReplyTo })
 } else {
   if (requestId === undefined) throw new Error("Request is missing its correlation ID")
   const replyTo = envelope["x-reply-to"]
@@ -74,13 +77,13 @@ if (inReplyTo !== undefined) {
     const peer = session.peers.find((candidate) => candidate.id === "c") ?? session.peers[0]
     if (peer === undefined) throw new Error("Expected a peer")
     session.pending[requestId] = replyTo ?? null
-    await post(peer.address, question, null)
+    await post(peer.address, question, { "x-request": requestId })
     answer = `Asked ${peer.id}; waiting.`
   } else {
     found = `Handled by ${nodeId}: ${question}`
   }
   // No x-reply-to means nobody is expecting an answer; the closing words only get logged.
-  if (found !== null && replyTo !== undefined) await post(replyTo, found, requestId)
+  if (found !== null && replyTo !== undefined) await post(replyTo, found, { "x-in-reply-to": requestId })
   else if (found !== null) answer = found
 }
 
@@ -96,9 +99,12 @@ emit({
 })
 emit({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } })
 
-// POST like the prompt tells a bird to: a question when inReplyTo is null, a reply
-// otherwise. Either way the other side only acknowledges.
-async function post(address: string, body: string, inReplyTo: string | null): Promise<void> {
+// POST the envelope's literal ID, as either a request or a reply.
+async function post(
+  address: string,
+  body: string,
+  correlation: { "x-request": string } | { "x-in-reply-to": string },
+): Promise<void> {
   const script = `curl -sS -X POST ${shellQuote(address)} --data-binary ${shellQuote(body)}`
   const command = `/bin/zsh -lc ${shellQuote(script)}`
   const item = {
@@ -117,9 +123,7 @@ async function post(address: string, body: string, inReplyTo: string | null): Pr
       "x-from": nodeId,
       "x-route": Bun.env["HUMMINGBIRDS_ROUTE"] ?? "[]",
       "x-reply-to": nodeAddress,
-      ...(inReplyTo === null
-        ? { "x-request": Bun.env["HUMMINGBIRDS_REQUEST_ID"] ?? "" }
-        : { "x-in-reply-to": Bun.env["HUMMINGBIRDS_REQUEST_ID"] ?? inReplyTo }),
+      ...correlation,
     },
     body,
   })

@@ -314,7 +314,7 @@ async function ask(question: string, context: Context): Promise<string> {
       HUMMINGBIRDS_NODE_ADDRESS: address,
       HUMMINGBIRDS_NODE_ID: nodeId,
       HUMMINGBIRDS_ROUTE: JSON.stringify(outgoingPath(context)),
-      HUMMINGBIRDS_REQUEST_ID: context.requestId,
+      HUMMINGBIRDS_REQUEST_ID: undefined, // Don't inherit a stale ID from a parent process.
     },
     stdin: new Blob([envelope(question, context)]),
     stdout: "pipe",
