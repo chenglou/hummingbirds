@@ -18,12 +18,11 @@ const usage = `Usage:
   birds start <id> [--detach]
   birds chat <id | port | host:port | URL>
   birds stop <id>
-  birds kill <id>
   birds list
 
 Birds live in ~/.birds (override with BIRDS_HOME).
 Start stays in the foreground unless --detach is given.
-Stop drains accepted work. Kill interrupts it. Neither deletes memory.`
+Stop drains accepted work and preserves memory.`
 
 const [command, ...args] = process.argv.slice(2)
 
@@ -105,11 +104,10 @@ try {
         }
         break
       }
-      case "stop":
-      case "kill": {
+      case "stop": {
         const bird = readBird(birdDirectory(oneArgument(args)))
-        await stopBird(bird, command === "kill")
-        console.log(`${command === "kill" ? "Killed" : "Stopped"} ${bird.id}.`)
+        await stopBird(bird)
+        console.log(`Stopped ${bird.id}.`)
         break
       }
       case "list": {

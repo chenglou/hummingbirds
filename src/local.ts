@@ -137,13 +137,13 @@ export async function birdStatus(bird: Bird): Promise<"stopped" | "unreachable" 
   return status === "stopping" ? "stopping" : "running"
 }
 
-export async function stopBird(bird: Bird, force: boolean): Promise<void> {
+export async function stopBird(bird: Bird): Promise<void> {
   const run = readRun(bird.directory)
   if (run === null) return
   const response = await fetch(`http://127.0.0.1:${bird.port}/control`, {
     method: "POST",
     headers: { authorization: `Bearer ${run.token}` },
-    body: force ? "kill" : "stop",
+    body: "stop",
   })
   if (!response.ok) throw new Error(await response.text())
   while (true) {

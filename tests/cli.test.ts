@@ -4,7 +4,7 @@ import { tmpdir } from "os"
 import { join, resolve } from "path"
 
 type Result = { code: number; stderr: string; stdout: string }
-type Event = { kind: string; codexPid?: number; question?: string; threadId?: string }
+type Event = { kind: string }
 
 const executable = resolve("src/cli.ts")
 const fakeCodex = resolve("tests/fake-codex.ts")
@@ -58,7 +58,12 @@ describe("birds", () => {
     const otherHome = await makeHome()
     expect((await command(otherHome, ["new", "a"])).code).toBe(0)
     expect((await command(otherHome, ["list"])).stdout).not.toContain(`:${a.port}/ask`)
-    expect((await command(home, ["--help"])).code).toBe(0)
+    const help = await command(home, ["--help"])
+    expect(help.code).toBe(0)
+    expect(help.stdout).not.toContain("birds kill")
+    const removed = await command(home, ["kill", "a"])
+    expect(removed.code).not.toBe(0)
+    expect(removed.stderr).toContain("Unknown command: kill")
     expect((await command(home, ["chat"])).code).not.toBe(0)
   }, 15_000)
 
@@ -70,6 +75,13 @@ describe("birds", () => {
 
     try {
       await waitUntil(async () => (await command(home, ["list"])).stdout.includes("memory\trunning\t"))
+      const run = JSON.parse(await readFile(join(home, "memory", "run.json"), "utf8")) as { token: string }
+      const removed = await fetch(`http://127.0.0.1:${port}/control`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${run.token}` },
+        body: "kill",
+      })
+      expect([removed.status, await removed.text()]).toEqual([400, "Send stop."])
       expect((await command(home, ["start", "memory", "--detach"])).code).not.toBe(0)
       expect((await post(port, "Remember the first message.")).status).toBe(202)
       await waitUntil(async () => (await events(home, "memory")).some((event) => event.kind === "completed"))
@@ -147,111 +159,47 @@ describe("birds", () => {
     }
   }, 20_000)
 
-  test("kills active work without deleting state or signaling an unrelated stale PID", async () => {
+  test("refuses to stop an unrelated process referenced by stale runtime state", async () => {
     const home = await makeHome()
-    expect((await command(home, ["new", "interrupt"])).code).toBe(0)
-    expect(
-      (
-        await command(home, ["start", "interrupt", "--detach"], {
-          HUMMINGBIRDS_FAKE_DELAY_MS: "600",
-          HUMMINGBIRDS_FAKE_INTERRUPT_MARKER: "interrupted",
-        })
-      ).code,
-    ).toBe(0)
-    const { port } = await metadata(home, "interrupt")
+    expect((await command(home, ["new", "stale"])).code).toBe(0)
+    const unrelated = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
+      stderr: "ignore",
+      stdout: "ignore",
+    })
 
     try {
-      expect((await post(port, "Save a conversation first.")).status).toBe(202)
-      await waitUntil(async () => {
-        return (await events(home, "interrupt")).some((event) => event.kind === "completed")
-      })
-      const thread = await readFile(join(home, "interrupt", "thread-id"), "utf8")
-      expect((await post(port, "Interrupt this conversation turn.")).status).toBe(202)
-      await waitUntil(async () => {
-        const started = (await events(home, "interrupt")).filter((event) => event.kind === "started")[1]
-        return started?.codexPid !== undefined &&
-          (await Bun.file(join(home, "interrupt", "workspace", ".fake-codex", `ready-${started.codexPid}`)).exists())
-      })
-      const interruptedPid = (await events(home, "interrupt")).findLast(
-        (event) => event.kind === "started",
-      )?.codexPid
-      if (interruptedPid === undefined) throw new Error("Missing started Codex process")
-      const killed = await command(home, ["kill", "interrupt"])
-      expect(killed.code).toBe(0)
-      expect(await readFile(join(home, "interrupt", "workspace", ".fake-codex", "interrupted"), "utf8")).toBe(
-        String(interruptedPid),
+      await writeFile(
+        join(home, "stale", "run.json"),
+        JSON.stringify({ pid: unrelated.pid, token: "not-this-birds-token" }),
       )
-      expect(await readFile(join(home, "interrupt", "thread-id"), "utf8")).toBe(thread)
-      expect(await Bun.file(join(home, "interrupt", "bird.json")).exists()).toBe(true)
-
-      expect((await command(home, ["new", "stale"])).code).toBe(0)
-      const unrelated = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {
-        stderr: "ignore",
-        stdout: "ignore",
-      })
-      try {
-        await writeFile(
-          join(home, "stale", "run.json"),
-          JSON.stringify({ pid: unrelated.pid, token: "not-this-birds-token" }),
-        )
-        expect((await command(home, ["kill", "stale"])).code).not.toBe(0)
-        expect(unrelated.exitCode).toBeNull()
-      } finally {
-        unrelated.kill()
-        await unrelated.exited
-      }
+      expect((await command(home, ["stop", "stale"])).code).not.toBe(0)
+      expect(unrelated.exitCode).toBeNull()
     } finally {
-      await stopIfRunning(home, "interrupt")
+      unrelated.kill()
+      await unrelated.exited
     }
-  }, 20_000)
+  })
 
-  test("force-stops a stalled failure callback or unfinished hatch upload", async () => {
+  test("stops without waiting for an unaccepted hatch upload", async () => {
     const home = await makeHome()
     expect((await command(home, ["new", "blocked"])).code).toBe(0)
     expect((await command(home, ["start", "blocked", "--detach"])).code).toBe(0)
     const { port } = await metadata(home, "blocked")
-    let callbackReceived = false
-    let releaseCallback: (() => void) | undefined
-    const stalled = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch() {
-        callbackReceived = true
-        return new Promise<Response>((resolve) => {
-          releaseCallback = () => resolve(new Response())
-        })
-      },
-    })
+    let unfinished: Awaited<ReturnType<typeof stalledPost>> | null = null
 
     try {
-      await writeFile(join(home, "blocked", "thread-id"), "")
-      expect(
-        (
-          await fetch(`http://127.0.0.1:${port}/ask`, {
-            method: "POST",
-            headers: { "x-reply-to": `http://127.0.0.1:${stalled.port}/ask` },
-            body: "Trigger a failure report that never returns.",
-          })
-        ).status,
-      ).toBe(202)
-      await waitUntil(async () => callbackReceived)
-      const callbackStop = performance.now()
-      expect((await command(home, ["kill", "blocked"])).code).toBe(0)
-      expect(performance.now() - callbackStop).toBeLessThan(2_000)
-
-      expect((await command(home, ["start", "blocked", "--detach"])).code).toBe(0)
-      const unfinished = await stalledPost(port, "/hatch", "unborn")
+      unfinished = await stalledPost(port, "/hatch", "unborn")
       const hatchStop = performance.now()
-      expect((await command(home, ["kill", "blocked"])).code).toBe(0)
+      expect((await command(home, ["stop", "blocked"])).code).toBe(0)
       expect(performance.now() - hatchStop).toBeLessThan(2_000)
-      unfinished.cancel()
-      await unfinished.response
       expect(await readdir(home)).not.toContain("unborn")
       expect(await Bun.file(join(home, "blocked", "bird.json")).exists()).toBe(true)
     } finally {
+      if (unfinished !== null) {
+        unfinished.cancel()
+        await unfinished.response
+      }
       await stopIfRunning(home, "blocked")
-      releaseCallback?.()
-      await stalled.stop(true)
     }
   }, 20_000)
 
@@ -339,7 +287,7 @@ async function stalledPost(port: number, path: string, message: string) {
 }
 
 async function stopIfRunning(home: string, id: string): Promise<void> {
-  if (await Bun.file(join(home, id, "run.json")).exists()) await command(home, ["kill", id])
+  if (await Bun.file(join(home, id, "run.json")).exists()) await command(home, ["stop", id])
 }
 
 async function waitUntil(check: () => Promise<boolean>): Promise<void> {

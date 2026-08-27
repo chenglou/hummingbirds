@@ -48,9 +48,7 @@ birds start b
 
 `new` creates a fresh bird without starting it. Repeat `--peer <local-id>` to give it starting peers; `--port 3001` chooses a specific port. Otherwise a free port is chosen and saved for future starts.
 
-`stop` rejects new work and finishes already-accepted messages before exiting. `kill` interrupts work immediately. Neither deletes saved memory; interrupted or queued messages can be lost when killed.
-
-Known Linux limitation: `kill` can leave a running Codex tool subprocess behind; prefer `stop` for now.
+`stop` rejects new work and finishes already-accepted messages before exiting. Saved memory remains for the next `start`.
 
 Each bird lives in `~/.birds/<id>/`; set `BIRDS_HOME` to use another local flock. The directory holds its identity and port (`bird.json`), prompt (`workspace/AGENTS.md`), conversation ID (`thread-id`), and event log (`events.jsonl`). Detached output is appended to `stdout.jsonl`.
 

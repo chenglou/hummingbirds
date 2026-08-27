@@ -55,12 +55,9 @@ const threadIdPath = join(directory, "thread-id")
 const eventsPath = join(directory, "events.jsonl")
 const subscribers: ReadableStreamDefaultController<Uint8Array>[] = []
 const encoder = new TextEncoder()
-const failureAbort = new AbortController()
 let queue: Promise<unknown> = Promise.resolve()
 let hatches: Promise<unknown> = Promise.resolve()
 let stopping = false
-let forced = false
-let active: { pid: number } | null = null
 const token = crypto.randomUUID()
 const runPath = join(directory, "run.json")
 
@@ -89,8 +86,8 @@ renameSync(`${runPath}.tmp`, runPath)
 const startup = `${JSON.stringify({ id: nodeId, pid: process.pid, url: address })}\n`
 emit(startup)
 
-process.on("SIGINT", () => shutdown(false))
-process.on("SIGTERM", () => shutdown(false))
+process.on("SIGINT", shutdown)
+process.on("SIGTERM", shutdown)
 
 async function control(request: Request): Promise<Response> {
   if (request.headers.get("authorization") !== `Bearer ${token}`) {
@@ -101,10 +98,10 @@ async function control(request: Request): Promise<Response> {
       return new Response(stopping ? "stopping" : "running")
     case "POST": {
       const action = await request.text()
-      if (action !== "stop" && action !== "kill") {
-        return new Response("Send stop or kill.", { status: 400 })
+      if (action !== "stop") {
+        return new Response("Send stop.", { status: 400 })
       }
-      setTimeout(() => shutdown(action === "kill"), 0)
+      setTimeout(shutdown, 0)
       return new Response("Stopping.", { status: 202 })
     }
     default:
@@ -112,19 +109,7 @@ async function control(request: Request): Promise<Response> {
   }
 }
 
-function shutdown(force: boolean): void {
-  if (force && !forced) {
-    forced = true
-    failureAbort.abort()
-    if (active !== null) {
-      try {
-        // Ask Codex to cancel its tools; see the Linux cleanup limitation in todo.md.
-        process.kill(active.pid, "SIGINT")
-      } catch {
-        // A Codex process may have finished just before the stop request arrived.
-      }
-    }
-  }
+function shutdown(): void {
   if (stopping) return
   stopping = true
   void Promise.all([queue, hatches]).finally(finishShutdown)
@@ -252,7 +237,6 @@ async function handleRequest(request: Request): Promise<Response> {
 function enqueueTurn(question: string, context: Context): void {
   // One Codex turn at a time: the conversation is a single thread.
   queue = queue.then(async () => {
-    if (forced) return
     try {
       const threadId = await ask(question, context)
       record(context, { kind: "completed", threadId })
@@ -278,7 +262,6 @@ async function reportFailure(replyTo: string, message: string, context: Context)
       [headers.replyTo]: address,
     },
     body: message,
-    signal: failureAbort.signal,
   }).catch(() => {})
 }
 
@@ -305,7 +288,6 @@ async function ask(question: string, context: Context): Promise<string> {
     threadId === null
       ? ["--search", "exec", ...common, ...codexArgs, "-"]
       : ["--search", "exec", "resume", ...common, ...codexArgs, threadId, "-"]
-  if (forced) throw new Error("Bird was killed.")
   const child = Bun.spawn([...codexCommand, ...args], {
     cwd: workspace,
     detached: true,
@@ -321,13 +303,11 @@ async function ask(question: string, context: Context): Promise<string> {
     stdout: "pipe",
     stderr: "ignore",
   })
-  active = child
   record(context, { kind: "started", codexPid: child.pid, threadId })
   const [startedThreadId, exitCode] = await Promise.all([
     readCodexOutput(child.stdout),
     child.exited,
   ])
-  active = null
 
   if (threadId === null && startedThreadId !== null) {
     await Bun.write(`${threadIdPath}.tmp`, startedThreadId)
