@@ -1,15 +1,25 @@
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "fs"
-import { homedir } from "os"
+import { devNull, homedir } from "os"
 import { dirname, join, resolve } from "path"
 
 export type Bird = { id: string; directory: string; port: number }
 
-type Options = { port?: number; peers?: string; seed?: string; maxBirds?: number }
+type Options = { port?: number; peers?: string; seed?: string }
 type Run = { pid: number; token: string }
+
+// Trusted bootstraps must not load a bird's writable Bun config or environment files.
+const bunCommand = [process.execPath, "--no-env-file", `--config=${devNull}`]
+
+// Pin both the interpreter and installation, not a bird's writable working directory.
+export const cliCommand = [
+  ...bunCommand,
+  `--cwd=${import.meta.dir}`,
+  require.resolve("./cli.ts"),
+]
 
 const executable = Bun.env["HUMMINGBIRDS_CODEX"]
 export const codexCommand = executable === undefined
-  ? [process.execPath, require.resolve("@openai/codex/bin/codex.js")]
+  ? [...bunCommand, require.resolve("@openai/codex/bin/codex.js")]
   : [executable]
 
 export function birdHome(): string {
@@ -41,18 +51,17 @@ export async function createBird(directory: string, id: string, options: Options
   if (options.port !== undefined && (!Number.isSafeInteger(options.port) || options.port < 0 || options.port > 65_535)) {
     throw new Error("Bird port must be between 0 and 65535.")
   }
-  if (options.maxBirds !== undefined && (!Number.isSafeInteger(options.maxBirds) || options.maxBirds < 1)) {
-    throw new Error("Local bird limit must be a positive integer.")
+  const maxBirds = Number(Bun.env["HUMMINGBIRDS_MAX_BIRDS"] ?? 32)
+  if (!Number.isSafeInteger(maxBirds) || maxBirds < 1) {
+    throw new Error("HUMMINGBIRDS_MAX_BIRDS must be a positive integer.")
   }
   mkdirSync(root, { recursive: true, mode: 0o700 })
   mkdirSync(directory, { mode: 0o700 })
 
-  if (options.maxBirds !== undefined) {
-    const count = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length
-    if (count > options.maxBirds) {
-      rmdirSync(directory)
-      throw new Error("Local bird limit reached.")
-    }
+  const count = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length
+  if (count > maxBirds) {
+    rmdirSync(directory)
+    throw new Error("Local bird limit reached.")
   }
 
   const requested = options.port ?? 0
@@ -77,11 +86,16 @@ export async function createBird(directory: string, id: string, options: Options
     const workspace = join(directory, "workspace")
     mkdirSync(workspace, { mode: 0o700 })
     const prompt = readFileSync(join(import.meta.dir, "prompt_template.md"), "utf8")
+    // Codex 0.149.1 misses command rules when the executable is unnecessarily quoted.
+    const command = cliCommand
+      .map((arg) => /^[\w./=:-]+$/.test(arg) ? arg : `'${arg.replaceAll("'", "'\\''")}'`)
+      .join(" ")
     await Bun.write(
       join(workspace, "AGENTS.md"),
       prompt
         .replaceAll("[id]", id)
         .replaceAll("[address]", `http://127.0.0.1:${port}/ask`)
+        .replaceAll("[command]", command)
         .replaceAll("[peers]", options.peers ?? "(none)")
         .replaceAll("[seed]", options.seed ?? "(none)"),
     )
@@ -96,14 +110,12 @@ export async function createBird(directory: string, id: string, options: Options
 
 export async function startBird(bird: Bird, detached: boolean): Promise<Bun.Subprocess> {
   const output = detached ? openSync(join(bird.directory, "stdout.jsonl"), "a") : undefined
-  const child = Bun.spawn([process.execPath, require.resolve("./server.ts")], {
+  const child = Bun.spawn([...bunCommand, require.resolve("./server.ts")], {
     cwd: bird.directory,
     detached: true,
     env: {
       ...process.env,
       HUMMINGBIRDS_DIRECTORY: bird.directory,
-      HUMMINGBIRDS_PEERS: undefined,
-      HUMMINGBIRDS_SEED: undefined,
     },
     stdin: "ignore",
     stdout: output ?? "inherit",

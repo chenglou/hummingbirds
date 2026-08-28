@@ -1,7 +1,7 @@
 # Specialization experiments
 
 Historical experiments tested whether birds could develop useful specialties
-before hatching existed. Disposable flocks used the real model, unlabeled peer
+before birds could create peers. Disposable flocks used the real model, unlabeled peer
 connections, and each bird's continuing conversation; they received no assigned
 roles, knowledge files, or specialized tools.
 

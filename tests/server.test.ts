@@ -1,8 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { basename, dirname, join, resolve } from "path"
-import { createBird } from "../src/local.ts"
+import { cliCommand, createBird } from "../src/local.ts"
 
 type Bird = {
   directory: string
@@ -55,6 +55,10 @@ describe("Hummingbirds", () => {
       expect(agents).not.toContain("HUMMINGBIRDS_REQUEST_ID")
       expect(agents).not.toContain("HUMMINGBIRDS_NODE_ID")
       expect(agents).not.toContain("HUMMINGBIRDS_NODE_ADDRESS")
+      expect(agents).not.toContain("[command]")
+      if (/^[A-Za-z0-9_./=-]+$/.test(process.execPath)) {
+        expect(agents).toContain(`${process.execPath} --no-env-file`)
+      }
 
       const eventResponse = await fetch(new URL("/events", bird.url))
       expect(eventResponse.headers.get("content-type")).toContain("application/x-ndjson")
@@ -684,187 +688,140 @@ describe("Hummingbirds", () => {
     }
   }, 15_000)
 
-  test("hatches independent blank children and grandchildren that outlive their parent", async () => {
-    const root = await makeTemporaryDirectory()
-    const parent = await startBird(join(root, "parent"), {
-      HUMMINGBIRDS_HATCH_MAX_BIRDS: "5",
-      HUMMINGBIRDS_SEED: "PARENT-ONLY-SECRET-71",
-      HUMMINGBIRDS_NODE_ID: "stale-parent",
-      HUMMINGBIRDS_NODE_ADDRESS: "http://127.0.0.1:1/ask",
-    })
-    const inbox = startInbox()
-    const descendants: { directory: string; id: string; pid: number; url: string }[] = []
-
-    async function hatch(url: string, id: string): Promise<(typeof descendants)[number]> {
-      const response = await fetch(new URL("/hatch", url), { method: "POST", body: id })
-      const body = await response.text()
-      if (response.status !== 201) throw new Error(`Hatching ${id} failed: ${response.status} ${body}`)
-      const match = new RegExp(`^Started ${id} at (http://127\\.0\\.0\\.1:\\d+/ask)\\.$`).exec(body)
-      if (match === null || match[1] === undefined) throw new Error(`Unexpected hatch response: ${body}`)
-
-      const directory = join(root, "parent", id)
-      const line = (await readFile(join(directory, "stdout.jsonl"), "utf8")).split("\n")[0]
-      if (line === undefined) throw new Error(`Missing startup announcement for ${id}`)
-      const startup = JSON.parse(line) as { id: string; pid: number; url: string }
-      expect(startup.id).toBe(id)
-      expect(startup.url).toBe(match[1])
-      expect(Number.isSafeInteger(startup.pid)).toBe(true)
-      const child = { directory, id, pid: startup.pid, url: startup.url }
-      descendants.push(child)
-      return child
-    }
-
-    async function ask(url: string, question: string, requestId: string): Promise<void> {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "x-reply-to": inbox.url,
-          "x-request": opaque(requestId),
-        },
-        body: question,
-      })
-      expect(response.status).toBe(202)
-    }
+  test("writes Codex configuration in the protected workspace directory and scopes its CLI rules", async () => {
+    const bird = await startBird(join(await makeTemporaryDirectory(), "rules"))
+    const stateDirectory = join(bird.directory, "bird")
+    const configDirectory = join(stateDirectory, "workspace", ".codex")
 
     try {
-      for (const id of ["", "../escaped", "nested/child", "has spaces", "x".repeat(65)]) {
-        const invalid = await fetch(new URL("/hatch", parent.url), { method: "POST", body: id })
-        expect(invalid.status).toBe(400)
+      expect(await Bun.file(join(stateDirectory, ".codex", "config.toml")).exists()).toBe(false)
+      expect(await Bun.file(join(stateDirectory, ".codex", "rules", "birds.rules")).exists()).toBe(false)
+      expect(Bun.TOML.parse(await readFile(join(configDirectory, "config.toml"), "utf8"))).toEqual({
+        approval_policy: "never",
+        sandbox_mode: "workspace-write",
+        sandbox_workspace_write: { network_access: true },
+      })
+      const rules = join(configDirectory, "rules", "birds.rules")
+      const commands = [
+        { argv: [...cliCommand, "new", "sprout", "--peer", "rules"], allowed: true },
+        { argv: [...cliCommand, "start", "sprout", "--detach"], allowed: true },
+        { argv: [...cliCommand, "stop", "rules"], allowed: false },
+        { argv: [...cliCommand, "list"], allowed: false },
+        { argv: [process.execPath, "-e", "console.log('not a bird command')"], allowed: false },
+        { argv: [process.execPath, require.resolve("../src/cli.ts"), "new", "sprout"], allowed: false },
+        { argv: [...cliCommand.map((arg) => arg.startsWith("--cwd=") ? `--cwd=${bird.directory}` : arg), "new", "sprout"], allowed: false },
+        { argv: [process.execPath, "--preload", "other.ts", ...cliCommand.slice(1), "new", "sprout"], allowed: false },
+        { argv: [...cliCommand.slice(0, -1), join(bird.directory, "other.ts"), "new", "sprout"], allowed: false },
+        { argv: ["/bin/sh", "-c", "printf ordinary-shell-command"], allowed: false },
+      ]
+      for (const { argv, allowed } of commands) {
+        const checked = Bun.spawn([
+          process.execPath, require.resolve("@openai/codex/bin/codex.js"),
+          "execpolicy", "check", "--rules", rules, "--", ...argv,
+        ], { stdout: "pipe", stderr: "pipe" })
+        const [code, stdout, stderr] = await Promise.all([
+          checked.exited, new Response(checked.stdout).text(), new Response(checked.stderr).text(),
+        ])
+        expect({ code, stderr }).toEqual({ code: 0, stderr: "" })
+        const decision = JSON.parse(stdout) as { decision?: string; matchedRules: object[] }
+        expect(decision.matchedRules).toHaveLength(allowed ? 1 : 0)
+        if (allowed) expect(decision.decision).toBe("allow")
       }
-      expect((await fetch(new URL("/hatch", parent.url))).status).toBe(405)
-
-      const child = await hatch(parent.url, "sprout")
-      const prompt = await readFile(join(child.directory, "workspace", "AGENTS.md"), "utf8")
-      expect(prompt).toContain(`Your ID is sprout, and your address is ${child.url}.`)
-      expect(prompt).toContain(`- parent at ${parent.url}`)
-      expect(prompt).not.toContain("PARENT-ONLY-SECRET-71")
-
-      let chatOutput = ""
-      const chat = startChat(root, new URL(child.url).port, (chunk) => {
-        chatOutput += chunk
-      })
-      const terminal = chat.terminal
-      if (terminal === undefined) throw new Error("Child chat did not start in a terminal")
-      try {
-        await waitUntil(async () => Bun.stripANSI(chatOutput).includes(" You "))
-        terminal.write("Hello from the terminal.\n")
-        await waitUntil(async () => {
-          return Bun.stripANSI(chatOutput).includes(
-            "sprout  Handled by sprout: Hello from the terminal.",
-          )
-        })
-      } finally {
-        if (chat.exitCode === null) chat.kill()
-        await chat.exited
-        terminal.close()
-      }
-
-      const duplicate = await fetch(new URL("/hatch", parent.url), {
-        method: "POST",
-        body: "sprout",
-      })
-      expect(duplicate.status).toBe(409)
-
-      const grandchild = await hatch(child.url, "twig")
-      const grandchildPrompt = await readFile(
-        join(grandchild.directory, "workspace", "AGENTS.md"),
-        "utf8",
-      )
-      expect(grandchildPrompt).toContain(`- sprout at ${child.url}`)
-      expect(grandchildPrompt).not.toContain(`- parent at ${parent.url}`)
-      expect(grandchildPrompt).not.toContain("PARENT-ONLY-SECRET-71")
-
-      const competing = await Promise.all(
-        [parent.url, child.url].map((url) => {
-          return fetch(new URL("/hatch", url), { method: "POST", body: "shared" })
-        }),
-      )
-      expect(competing.map((response) => response.status).sort((left, right) => left - right)).toEqual([
-        201,
-        409,
-      ])
-      const sharedDirectory = join(root, "parent", "shared")
-      const sharedLine = (await readFile(join(sharedDirectory, "stdout.jsonl"), "utf8")).split("\n")[0]
-      if (sharedLine === undefined) throw new Error("Missing startup announcement for shared")
-      const shared = JSON.parse(sharedLine) as { id: string; pid: number; url: string }
-      descendants.push({ ...shared, directory: sharedDirectory })
-
-      const contenders = [
-        { id: "last-parent", url: parent.url },
-        { id: "last-child", url: child.url },
-      ] as const
-      const lastSlot = await Promise.all(
-        contenders.map(({ id, url }) => {
-          return fetch(new URL("/hatch", url), {
-            method: "POST",
-            body: id,
-          })
-        }),
-      )
-      expect(lastSlot.every((response) => response.status === 201 || response.status === 429)).toBe(true)
-      expect(lastSlot.filter((response) => response.status === 201).length).toBeLessThanOrEqual(1)
-      const acceptedName = contenders[lastSlot.findIndex((response) => response.status === 201)]?.id
-      if (acceptedName === undefined) {
-        await hatch(parent.url, "last-retry")
-      } else {
-        const acceptedDirectory = join(root, "parent", acceptedName)
-        const acceptedLine = (await readFile(join(acceptedDirectory, "stdout.jsonl"), "utf8")).split(
-          "\n",
-        )[0]
-        if (acceptedLine === undefined) throw new Error(`Missing startup announcement for ${acceptedName}`)
-        const accepted = JSON.parse(acceptedLine) as { id: string; pid: number; url: string }
-        descendants.push({ ...accepted, directory: acceptedDirectory })
-      }
-
-      const overflow = await fetch(new URL("/hatch", grandchild.url), {
-        method: "POST",
-        body: "overflow",
-      })
-      expect(overflow.status).toBe(429)
-      expect(await readdir(join(root, "parent"))).not.toContain("overflow")
-
-      await Promise.all([
-        ask(parent.url, "parent message", "q-parent"),
-        ask(child.url, "child message", "q-child"),
-        ask(grandchild.url, "grandchild message", "q-grandchild"),
-      ])
-      await waitUntil(async () => inbox.messages.length === 3)
-      expect(inbox.messages.map((message) => message.from).sort()).toEqual([
-        "parent",
-        "sprout",
-        "twig",
-      ])
-
-      await waitUntil(async () => {
-        const paths = [child.directory, grandchild.directory].map((directory) => {
-          return Bun.file(join(directory, "thread-id")).exists()
-        })
-        return (await Promise.all(paths)).every(Boolean)
-      })
-      const childThread = await readFile(join(child.directory, "thread-id"), "utf8")
-      const grandchildThread = await readFile(join(grandchild.directory, "thread-id"), "utf8")
-      expect(childThread).not.toBe(grandchildThread)
-
-      await stopBird(parent)
-      await Promise.all([
-        ask(child.url, "still independent", "q-child-again"),
-        ask(grandchild.url, "still independent", "q-grandchild-again"),
-      ])
-      await waitUntil(async () => inbox.messages.length === 5)
-      expect(await readFile(join(child.directory, "thread-id"), "utf8")).toBe(childThread)
-      expect(await readFile(join(grandchild.directory, "thread-id"), "utf8")).toBe(grandchildThread)
     } finally {
-      await stopBird(parent)
-      for (const child of descendants.reverse()) {
-        try {
-          process.kill(child.pid, "SIGTERM")
-        } catch {
-          // An already-exited detached child has nothing left to clean up.
-        }
-      }
-      inbox.stop()
+      await stopBird(bird)
     }
-  }, 20_000)
+  }, 15_000)
+
+  test("native workspace sandbox protects generated policy without disabling temporary writes", async () => {
+    const root = await makeTemporaryDirectory()
+    const bird = await startBird(join(root, "sandbox"))
+    const workspace = join(bird.directory, "bird", "workspace")
+    const configPath = join(workspace, ".codex", "config.toml")
+    const rulesPath = join(workspace, ".codex", "rules", "birds.rules")
+    const temporaryWrite = join(root, "outside-workspace.txt")
+    const script = join(root, "check-boundary.cjs")
+    const codexHome = join(root, "codex-home")
+
+    try {
+      await mkdir(codexHome)
+      const config = await readFile(configPath, "utf8")
+      const rules = await readFile(rulesPath, "utf8")
+      await writeFile(script, `const { writeFileSync, renameSync } = require("fs")\n` +
+        `const { join } = require("path")\n` +
+        `const policy = join(process.cwd(), ".codex")\n` +
+        `const results = {}\n` +
+        `const writes = [\n` +
+        `  ["workspace", () => writeFileSync("ordinary.txt", "ok")],\n` +
+        `  ["temporary", () => writeFileSync(process.argv[2], "ok")],\n` +
+        `  ["new-rule", () => writeFileSync(join(policy, "rules", "added.rules"), "probe")],\n` +
+        `  ["config-overwrite", () => writeFileSync(join(policy, "config.toml"), "probe")],\n` +
+        `  ["policy-rename", () => renameSync(policy, join(process.cwd(), ".codex-moved"))],\n` +
+        `]\n` +
+        `for (const [name, write] of writes) {\n` +
+        `  try { write(); results[name] = null } catch (error) { results[name] = error.code }\n` +
+        `}\n` +
+        `console.log(JSON.stringify(results))\n`)
+      const child = Bun.spawn([
+        process.execPath, require.resolve("@openai/codex/bin/codex.js"), "sandbox",
+        "-c", 'sandbox_mode="workspace-write"',
+        "-c", "sandbox_workspace_write.writable_roots=[]",
+        "-c", "sandbox_workspace_write.exclude_slash_tmp=false",
+        "-c", "sandbox_workspace_write.exclude_tmpdir_env_var=false",
+        "-c", 'project_root_markers=[".codex"]',
+        "-c", `projects={${JSON.stringify(workspace)}={trust_level="trusted"}}`,
+        "--", process.execPath, "--no-env-file", script, temporaryWrite,
+      ], { cwd: workspace, env: { ...Bun.env, CODEX_HOME: codexHome }, stdout: "pipe", stderr: "pipe" })
+      const [code, stdout, stderr] = await Promise.all([
+        child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+      ])
+      expect({ code, stderr }).toEqual({ code: 0, stderr: "" })
+      const results = JSON.parse(stdout) as Record<string, string | null>
+      expect(results["workspace"]).toBeNull()
+      expect(results["temporary"]).toBeNull()
+      for (const action of ["new-rule", "config-overwrite", "policy-rename"]) {
+        expect(results[action]).toMatch(/^(EPERM|EACCES|EROFS)$/)
+      }
+      expect(await readFile(join(workspace, "ordinary.txt"), "utf8")).toBe("ok")
+      expect(await readFile(temporaryWrite, "utf8")).toBe("ok")
+      expect(await readFile(configPath, "utf8")).toBe(config)
+      expect(await readFile(rulesPath, "utf8")).toBe(rules)
+      expect(await Bun.file(join(workspace, ".codex", "rules", "added.rules")).exists()).toBe(false)
+    } finally {
+      await stopBird(bird)
+    }
+  }, 15_000)
+
+  test("pins model children to their own home and clears inherited initialization", async () => {
+    const root = await makeTemporaryDirectory()
+    const capture = join(root, "capture-environment.ts")
+    await writeFile(capture, `#!${process.execPath}\n` +
+      `const names = ["BIRDS_HOME", "HUMMINGBIRDS_SEED", "HUMMINGBIRDS_PEERS", "HUMMINGBIRDS_MAX_BIRDS"]\n` +
+      `await Bun.stdin.text()\n` +
+      `await Bun.write("captured-environment.json", JSON.stringify(Object.fromEntries(names.map(name => [name, Bun.env[name] ?? null]))))\n` +
+      `console.log(JSON.stringify({ type: "thread.started", thread_id: crypto.randomUUID() }))\n`,
+    { mode: 0o700 })
+    const bird = await startBird(join(root, "owned"), {
+      BIRDS_HOME: "wrong-relative-home",
+      HUMMINGBIRDS_CODEX: capture,
+      HUMMINGBIRDS_SEED: "ONLY-THIS-BIRDS-SEED",
+      HUMMINGBIRDS_PEERS: "- initial at http://127.0.0.1:1/ask",
+      HUMMINGBIRDS_MAX_BIRDS: "3",
+    })
+
+    try {
+      expect((await send(bird, "Inspect the child environment.", opaque("child-environment"))).status).toBe(202)
+      await waitUntil(async () => (await events(bird)).some((event) => event.kind === "completed"))
+      expect(JSON.parse(await readFile(join(bird.directory, "bird", "workspace", "captured-environment.json"), "utf8"))).toEqual({
+        BIRDS_HOME: bird.directory,
+        HUMMINGBIRDS_SEED: null,
+        HUMMINGBIRDS_PEERS: null,
+        HUMMINGBIRDS_MAX_BIRDS: "3",
+      })
+      expect(await readFile(join(bird.directory, "bird", "workspace", "AGENTS.md"), "utf8")).toContain("ONLY-THIS-BIRDS-SEED")
+    } finally {
+      await stopBird(bird)
+    }
+  })
 
   test("runs the packaged Codex without a globally installed Codex or Node", async () => {
     const root = await makeTemporaryDirectory()
@@ -877,6 +834,9 @@ describe("Hummingbirds", () => {
     })
 
     try {
+      const workspace = join(bird.directory, "bird", "workspace")
+      await writeFile(join(workspace, "bunfig.toml"), 'preload = ["./unexpected.ts"]\n')
+      await writeFile(join(workspace, "unexpected.ts"), 'throw new Error("Bird workspace preload must not run")\n')
       expect((await send(bird, "Show the packaged CLI.", opaque("packaged-codex"))).status).toBe(202)
       await waitUntil(async () => {
         return (await events(bird)).some(
@@ -916,28 +876,33 @@ describe("Hummingbirds", () => {
 
       const threadIdPath = join(bird.directory, "bird", "thread-id")
       const threadId = await readFile(threadIdPath, "utf8")
-      const common = [
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--skip-git-repo-check",
-        "-c",
-        'approval_policy="never"',
-        "-c",
-        'sandbox_mode="workspace-write"',
-        "-c",
-        "sandbox_workspace_write.network_access=true",
-        "-c",
-        "project_root_markers=[]",
-        "--json",
-      ]
+      const stateDirectory = join(bird.directory, "bird")
+      const workspace = join(stateDirectory, "workspace")
       const extra = ["-m", "gpt-test", "-c", "model_auto_compact_token_limit=20000"]
-      const argvPath = join(bird.directory, "bird", "workspace", ".fake-codex", "argv.jsonl")
+      const argvPath = join(workspace, ".fake-codex", "argv.jsonl")
       const readArgv = async (): Promise<string[][]> =>
         (await readFile(argvPath, "utf8"))
           .trim()
           .split("\n")
           .map((line) => JSON.parse(line) as string[])
-      expect(await readArgv()).toEqual([
+      const argv = await readArgv()
+      const projects = argv[0]?.find((argument) => argument.startsWith("projects="))
+      if (projects === undefined) throw new Error("Codex did not receive project trust")
+      expect(Bun.TOML.parse(projects)).toEqual({
+        projects: {
+          [workspace]: { trust_level: "trusted" },
+        },
+      })
+      const common = [
+        "--ignore-user-config",
+        "--skip-git-repo-check",
+        "-c",
+        'project_root_markers=[".codex"]',
+        "-c",
+        projects,
+        "--json",
+      ]
+      expect(argv).toEqual([
         ["--search", "exec", ...common, ...extra, "-"],
         ["--search", "exec", "resume", ...common, ...extra, threadId, "-"],
       ])

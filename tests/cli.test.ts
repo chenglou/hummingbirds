@@ -1,12 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, readdir, rm, writeFile } from "fs/promises"
+import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join, resolve } from "path"
+import { cliCommand } from "../src/local.ts"
 
 type Result = { code: number; stderr: string; stdout: string }
 type Event = { kind: string }
 
-const executable = resolve("src/cli.ts")
 const fakeCodex = resolve("tests/fake-codex.ts")
 const homes: string[] = []
 
@@ -40,7 +40,9 @@ describe("birds", () => {
     expect(listed.stdout).toContain(`a\tstopped\thttp://127.0.0.1:${a.port}/ask`)
     expect(listed.stdout).toContain(`b\tstopped\thttp://127.0.0.1:${b.port}/ask`)
     expect((await command(home, ["new", "a"])).code).not.toBe(0)
-    expect((await command(home, ["new", "../escaped"])).code).not.toBe(0)
+    for (const id of ["", "../escaped", "nested/child", "has spaces", "x".repeat(65)]) {
+      expect((await command(home, ["new", id])).code).not.toBe(0)
+    }
 
     const collision = await command(home, ["new", "collision", "--port", String(b.port)])
     expect(collision.code).not.toBe(0)
@@ -66,6 +68,113 @@ describe("birds", () => {
     expect(removed.stderr).toContain("Unknown command: kill")
     expect((await command(home, ["chat"])).code).not.toBe(0)
   }, 15_000)
+
+  test("trusted CLI and server launches ignore bird-local Bun configuration", async () => {
+    const home = await makeHome()
+    const workspace = await makeHome()
+    await writeFile(join(workspace, ".env"), "HUMMINGBIRDS_SEED=WORKSPACE-ENV-MUST-NOT-LOAD\n")
+    await writeFile(join(workspace, "bunfig.toml"), 'preload = ["./unexpected.ts"]\n')
+    await writeFile(join(workspace, "unexpected.ts"), 'throw new Error("Workspace preload must not run")\n')
+    const child = Bun.spawn([...cliCommand, "new", "pinned"], {
+      cwd: workspace,
+      env: {
+        ...Bun.env,
+        BIRDS_HOME: home,
+        HUMMINGBIRDS_MAX_BIRDS: undefined,
+        HUMMINGBIRDS_PEERS: undefined,
+        HUMMINGBIRDS_SEED: undefined,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ])
+    expect({ code, stderr }).toEqual({ code: 0, stderr: "" })
+    expect(stdout).toContain("Created pinned.")
+    expect(await readFile(join(home, "pinned", "workspace", "AGENTS.md"), "utf8"))
+      .not.toContain("WORKSPACE-ENV-MUST-NOT-LOAD")
+
+    const directory = join(home, "pinned")
+    const capture = join(home, "capture-launch.ts")
+    await writeFile(join(directory, ".env"), "BIRDS_TEST_LOCAL_ENV=STATE-ENV-MUST-NOT-LOAD\n")
+    await writeFile(join(directory, "bunfig.toml"), 'preload = ["./unexpected.ts"]\n')
+    await writeFile(join(directory, "unexpected.ts"), 'throw new Error("Bird state preload must not run")\n')
+    await writeFile(capture, `#!${process.execPath}\n` +
+      `await Bun.stdin.text()\n` +
+      `await Bun.write("launch-environment.json", JSON.stringify({ cwd: process.cwd(), local: Bun.env["BIRDS_TEST_LOCAL_ENV"] ?? null }))\n` +
+      `console.log(JSON.stringify({ type: "thread.started", thread_id: crypto.randomUUID() }))\n`,
+    { mode: 0o700 })
+    try {
+      const started = await command(home, ["start", "pinned", "--detach"], { HUMMINGBIRDS_CODEX: capture })
+      expect(started.code).toBe(0)
+      const { port } = await metadata(home, "pinned")
+      expect((await post(port, "Inspect the launch environment.")).status).toBe(202)
+      await waitUntil(async () => (await events(home, "pinned")).some((event) => event.kind === "completed"))
+      expect(JSON.parse(await readFile(join(directory, "workspace", "launch-environment.json"), "utf8"))).toEqual({
+        cwd: await realpath(join(directory, "workspace")),
+        local: null,
+      })
+    } finally {
+      await stopIfRunning(home, "pinned")
+    }
+  })
+
+  test("reserves a bird ID exactly once across concurrent creation", async () => {
+    const home = await makeHome()
+    const competing = await Promise.all([
+      command(home, ["new", "shared"]),
+      command(home, ["new", "shared"]),
+    ])
+    expect(competing.map((result) => result.code).sort((left, right) => left - right)).toEqual([0, 1])
+    const original = await readFile(join(home, "shared", "bird.json"), "utf8")
+    const prompt = await readFile(join(home, "shared", "workspace", "AGENTS.md"), "utf8")
+    expect(
+      (await command(home, ["new", "shared"], { HUMMINGBIRDS_SEED: "MUST-NOT-REPLACE" })).code,
+    ).toBe(1)
+    expect(await readFile(join(home, "shared", "bird.json"), "utf8")).toBe(original)
+    expect(await readFile(join(home, "shared", "workspace", "AGENTS.md"), "utf8")).toBe(prompt)
+    expect(await readdir(home)).toEqual(["shared"])
+  })
+
+  test("limits retained bird directories to 32 by default", async () => {
+    const home = await makeHome()
+    for (let index = 0; index < 32; index++) {
+      expect((await command(home, ["new", `bird-${index}`])).code).toBe(0)
+    }
+    const overflow = await command(home, ["new", "overflow"])
+    expect(overflow.code).toBe(1)
+    expect(overflow.stderr).toContain("Local bird limit reached.")
+    expect(await readdir(home)).toHaveLength(32)
+    expect(await Bun.file(join(home, "overflow", "bird.json")).exists()).toBe(false)
+  }, 15_000)
+
+  test("validates the configured cap and never overbooks a concurrent last slot", async () => {
+    const home = await makeHome()
+    for (const limit of ["0", "-1", "1.5", "NaN"]) {
+      const invalid = await command(home, ["new", "invalid"], { HUMMINGBIRDS_MAX_BIRDS: limit })
+      expect(invalid.code).toBe(1)
+      expect(invalid.stderr).toContain("positive integer")
+      expect(await readdir(home)).toEqual([])
+    }
+    const environment = { HUMMINGBIRDS_MAX_BIRDS: "2" }
+    expect((await command(home, ["new", "retained"], environment)).code).toBe(0)
+    const contenders = await Promise.all([
+      command(home, ["new", "last-a"], environment),
+      command(home, ["new", "last-b"], environment),
+    ])
+    expect(
+      contenders.every((result) => result.code === 0 || result.stderr.includes("Local bird limit reached.")),
+    ).toBe(true)
+    const admitted = contenders.filter((result) => result.code === 0).length
+    expect(admitted).toBeLessThanOrEqual(1)
+    // Both reservations can see a full root before either rolls back.
+    if (admitted === 0) expect((await command(home, ["new", "last-retry"], environment)).code).toBe(0)
+    expect(await readdir(home)).toHaveLength(2)
+    expect((await command(home, ["new", "overflow"], environment)).stderr).toContain("Local bird limit reached.")
+    expect(await readdir(home)).not.toContain("overflow")
+    expect((await command(home, ["list"])).stdout).toContain("retained\tstopped\t")
+  })
 
   test("starts in the foreground, rejects duplicates, and resumes on its stable port", async () => {
     const home = await makeHome()
@@ -102,7 +211,7 @@ describe("birds", () => {
 
       let output = ""
       const decoder = new TextDecoder()
-      const client = Bun.spawn([process.execPath, executable, "chat", "memory"], {
+      const client = Bun.spawn([...cliCommand, "chat", "memory"], {
         env: { ...Bun.env, BIRDS_HOME: home, HUMMINGBIRDS_CODEX: fakeCodex },
         terminal: {
           cols: 120,
@@ -144,7 +253,7 @@ describe("birds", () => {
       expect((await post(port, "Second accepted message.")).status).toBe(202)
       await waitUntil(async () => (await events(home, "drain")).some((event) => event.kind === "started"))
 
-      const late = await stalledPost(port, "/ask", "This upload started before shutdown.")
+      const late = await stalledPost(port, "This upload started before shutdown.")
       const stopping = command(home, ["stop", "drain"])
       await waitUntil(async () => (await command(home, ["list"])).stdout.includes("drain\tstopping\t"))
       await late.complete()
@@ -180,7 +289,7 @@ describe("birds", () => {
     }
   })
 
-  test("stops without waiting for an unaccepted hatch upload", async () => {
+  test("stops without waiting for an unaccepted message upload", async () => {
     const home = await makeHome()
     expect((await command(home, ["new", "blocked"])).code).toBe(0)
     expect((await command(home, ["start", "blocked", "--detach"])).code).toBe(0)
@@ -188,11 +297,12 @@ describe("birds", () => {
     let unfinished: Awaited<ReturnType<typeof stalledPost>> | null = null
 
     try {
-      unfinished = await stalledPost(port, "/hatch", "unborn")
-      const hatchStop = performance.now()
+      unfinished = await stalledPost(port, "This message body never finishes.")
+      const stoppingAt = performance.now()
       expect((await command(home, ["stop", "blocked"])).code).toBe(0)
-      expect(performance.now() - hatchStop).toBeLessThan(2_000)
-      expect(await readdir(home)).not.toContain("unborn")
+      expect(performance.now() - stoppingAt).toBeLessThan(2_000)
+      expect(await events(home, "blocked")).toEqual([])
+      expect(await Bun.file(join(home, "blocked", "thread-id")).exists()).toBe(false)
       expect(await Bun.file(join(home, "blocked", "bird.json")).exists()).toBe(true)
     } finally {
       if (unfinished !== null) {
@@ -203,27 +313,98 @@ describe("birds", () => {
     }
   }, 20_000)
 
-  test("lists hatched children and keeps them alive after their parent stops", async () => {
+  test("new peers have fresh memory and keep running after their initial peer stops", async () => {
     const home = await makeHome()
-    expect((await command(home, ["new", "parent"])).code).toBe(0)
+    expect(
+      (await command(home, ["new", "parent"], { HUMMINGBIRDS_SEED: "PARENT-ONLY-FACT-71" })).code,
+    ).toBe(0)
     expect((await command(home, ["start", "parent", "--detach"])).code).toBe(0)
-    const { port } = await metadata(home, "parent")
+    const parent = await metadata(home, "parent")
+    const replies: { from: string | null; inReplyTo: string | null; request: string | null; body: string }[] = []
+    const inbox = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        replies.push({
+          from: request.headers.get("x-from"),
+          inReplyTo: request.headers.get("x-in-reply-to"),
+          request: request.headers.get("x-request"),
+          body: await request.text(),
+        })
+        return new Response("Accepted.", { status: 202 })
+      },
+    })
 
     try {
-      const hatched = await fetch(`http://127.0.0.1:${port}/hatch`, { method: "POST", body: "child" })
-      expect(hatched.status).toBe(201)
+      expect((await post(parent.port, "Remember the parent's own conversation.")).status).toBe(202)
+      await waitUntil(async () => (await events(home, "parent")).some((event) => event.kind === "completed"))
+      const parentThread = await readFile(join(home, "parent", "thread-id"), "utf8")
+
+      expect((await command(home, ["new", "sprout", "--peer", "parent"])).code).toBe(0)
+      const child = await metadata(home, "sprout")
+      const prompt = await readFile(join(home, "sprout", "workspace", "AGENTS.md"), "utf8")
+      expect(prompt).toContain(`Your ID is sprout, and your address is http://127.0.0.1:${child.port}/ask.`)
+      expect(prompt).toContain(`- parent at http://127.0.0.1:${parent.port}/ask`)
+      expect(prompt).not.toContain("PARENT-ONLY-FACT-71")
+      expect(await Bun.file(join(home, "sprout", "thread-id")).exists()).toBe(false)
+      expect(await readdir(join(home, "sprout", "workspace"))).toEqual(["AGENTS.md"])
+      expect((await command(home, ["start", "sprout", "--detach"])).code).toBe(0)
+
+      expect((await command(home, ["new", "twig", "--peer", "sprout"])).code).toBe(0)
+      const grandchild = await metadata(home, "twig")
+      const grandchildPrompt = await readFile(join(home, "twig", "workspace", "AGENTS.md"), "utf8")
+      expect(grandchildPrompt).toContain(`- sprout at http://127.0.0.1:${child.port}/ask`)
+      expect(grandchildPrompt).not.toContain(`- parent at http://127.0.0.1:${parent.port}/ask`)
+      expect(grandchildPrompt).not.toContain("PARENT-ONLY-FACT-71")
+      expect(await Bun.file(join(home, "twig", "thread-id")).exists()).toBe(false)
+      expect((await command(home, ["start", "twig", "--detach"])).code).toBe(0)
+
+      await Promise.all([
+        post(child.port, "First sprout message."),
+        post(grandchild.port, "First twig message."),
+      ])
+      await waitUntil(async () => (await events(home, "sprout")).some((event) => event.kind === "completed"))
+      await waitUntil(async () => (await events(home, "twig")).some((event) => event.kind === "completed"))
+      const childThread = await readFile(join(home, "sprout", "thread-id"), "utf8")
+      const grandchildThread = await readFile(join(home, "twig", "thread-id"), "utf8")
+      expect(childThread).not.toBe(parentThread)
+      expect(grandchildThread).not.toBe(parentThread)
+      expect(childThread).not.toBe(grandchildThread)
+
       const listed = await command(home, ["list"])
       expect(listed.stdout).toContain("parent\trunning\t")
-      expect(listed.stdout).toContain("child\trunning\t")
+      expect(listed.stdout).toContain("sprout\trunning\t")
+      expect(listed.stdout).toContain("twig\trunning\t")
 
       expect((await command(home, ["stop", "parent"])).code).toBe(0)
-      const { port: childPort } = await metadata(home, "child")
-      expect((await post(childPort, "Still independent.")).status).toBe(202)
-      await waitUntil(async () => (await events(home, "child")).some((event) => event.kind === "completed"))
-      expect((await command(home, ["list"])).stdout).toContain("child\trunning\t")
+      for (const [id, port] of [["sprout", child.port], ["twig", grandchild.port]] as const) {
+        const requestId = crypto.randomUUID()
+        const response = await fetch(`http://127.0.0.1:${port}/ask`, {
+          method: "POST",
+          headers: {
+            "x-request": requestId,
+            "x-reply-to": `http://127.0.0.1:${inbox.port}/ask`,
+          },
+          body: "Still independent.",
+        })
+        expect(response.status).toBe(202)
+        await waitUntil(async () => replies.some((reply) => reply.inReplyTo === requestId))
+        expect(replies.find((reply) => reply.inReplyTo === requestId)).toEqual({
+          from: id,
+          inReplyTo: requestId,
+          request: null,
+          body: `Handled by ${id}: Still independent.`,
+        })
+      }
+      expect(replies).toHaveLength(2)
+      await waitUntil(async () => (await events(home, "sprout")).filter((event) => event.kind === "completed").length === 2)
+      await waitUntil(async () => (await events(home, "twig")).filter((event) => event.kind === "completed").length === 2)
+      expect(await readFile(join(home, "sprout", "thread-id"), "utf8")).toBe(childThread)
+      expect(await readFile(join(home, "twig", "thread-id"), "utf8")).toBe(grandchildThread)
+      expect((await command(home, ["list"])).stdout).toContain("sprout\trunning\t")
     } finally {
-      await stopIfRunning(home, "child")
-      await stopIfRunning(home, "parent")
+      await Promise.all(["twig", "sprout", "parent"].map((id) => stopIfRunning(home, id)))
+      await inbox.stop(true)
     }
   }, 20_000)
 })
@@ -235,8 +416,16 @@ async function makeHome(): Promise<string> {
 }
 
 function spawn(home: string, args: string[], environment: Record<string, string> = {}) {
-  return Bun.spawn([process.execPath, executable, ...args], {
-    env: { ...Bun.env, BIRDS_HOME: home, HUMMINGBIRDS_CODEX: fakeCodex, ...environment },
+  return Bun.spawn([...cliCommand, ...args], {
+    env: {
+      ...Bun.env,
+      BIRDS_HOME: home,
+      HUMMINGBIRDS_CODEX: fakeCodex,
+      HUMMINGBIRDS_MAX_BIRDS: undefined,
+      HUMMINGBIRDS_PEERS: undefined,
+      HUMMINGBIRDS_SEED: undefined,
+      ...environment,
+    },
     stderr: "pipe",
     stdout: "pipe",
   })
@@ -273,11 +462,11 @@ async function post(port: number, message: string): Promise<Response> {
   return fetch(`http://127.0.0.1:${port}/ask`, { method: "POST", body: message })
 }
 
-async function stalledPost(port: number, path: string, message: string) {
+async function stalledPost(port: number, message: string) {
   const abort = new AbortController()
   const stream = new TransformStream<Uint8Array, Uint8Array>()
   const writer = stream.writable.getWriter()
-  const response = fetch(`http://127.0.0.1:${port}${path}`, {
+  const response = fetch(`http://127.0.0.1:${port}/ask`, {
     method: "POST",
     body: stream.readable,
     signal: abort.signal,

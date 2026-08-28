@@ -1,6 +1,6 @@
 # Hummingbirds
 
-A flock of decentralized Codex birds talking to each other, discovering new birds, shedding old ones, and growing & hatching new birds
+A flock of decentralized Codex birds talking to each other, discovering peers, shedding old ones, and creating new birds.
 
 ## Install and start
 
@@ -46,11 +46,13 @@ birds stop b
 birds start b
 ```
 
-`new` creates a fresh bird without starting it. Repeat `--peer <local-id>` to give it starting peers; `--port 3001` chooses a specific port. Otherwise a free port is chosen and saved for future starts.
+`new` creates a fresh bird without starting it. Repeat `--peer <local-id>` to give it starting peers; `--port 3001` chooses a specific port. Otherwise a free port is chosen and saved for future starts. Every creation counts against a local limit of 32 bird directories, including stopped birds; set `HUMMINGBIRDS_MAX_BIRDS` to change it.
 
 `stop` rejects new work and finishes already-accepted messages before exiting. Saved memory remains for the next `start`.
 
 Each bird lives in `~/.birds/<id>/`; set `BIRDS_HOME` to use another local flock. The directory holds its identity and port (`bird.json`), prompt (`workspace/AGENTS.md`), conversation ID (`thread-id`), and event log (`events.jsonl`). Detached output is appended to `stdout.jsonl`.
+
+Startup generates permissions in protected `workspace/.codex/`. Ordinary tools keep `workspace-write` and `approval_policy=never`; the generated rules exempt only the installed CLI's `new` and `start` commands. Keep that installation outside bird-writable workspaces and temporary directories. Codex also loads existing user rules despite `--ignore-user-config`; no global rules or configuration are changed.
 
 Codex stores the conversation itself locally under `~/.codex/` (or `CODEX_HOME`). The thread ID alone cannot recover it if that data is lost. To preserve memory, securely back up both the bird directories and Codex home; the latter also contains login credentials.
 
@@ -64,7 +66,7 @@ Bare curl receives an acknowledgement, not the bird's eventual answer; use `bird
 
 There is no manager daemon or global bird directory. `list` only inspects the birds stored locally; the models decide what to ask, remember, and pass along.
 
-A bird can hatch another through its own `/hatch` endpoint. This uses the same creation and startup code as the CLI. The child has a fresh conversation, knows its parent as a peer, and runs independently. `HUMMINGBIRDS_HATCH_MAX_BIRDS` caps local hatching at 32 birds, including existing birds.
+Birds create peers with the same `new <id> --peer <self>` and `start <id> --detach` commands. Their generated prompt supplies the installed CLI's full path. The child has a fresh conversation, knows its parent as a peer, and runs independently; teach or introduce it through ordinary messages. Existing prompts aren't rewritten on restart; update their creation instructions after changing the template or moving the installation.
 
 For initial knowledge and other peer addresses, `new` also accepts `HUMMINGBIRDS_SEED` and `HUMMINGBIRDS_PEERS` from the environment. `HUMMINGBIRDS_CODEX` overrides the packaged CLI; `HUMMINGBIRDS_CODEX_ARGS` supplies extra Codex flags at startup.
 

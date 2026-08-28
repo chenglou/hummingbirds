@@ -1,11 +1,13 @@
-# Hatching experiments
+# Splitting experiments
 
 Can a bird create another genuinely independent bird without adding a flock
 manager, routing registry, specialization policy, or separate hosting service?
 
-Yes. Each bird's existing Bun server can launch a detached sibling outside its
-Codex shell sandbox. The bird chooses whether to hatch, what the child should
-know, and whom to introduce through ordinary messages.
+Historical trials established independent creation, selective teaching, and
+useful specialization without those additions. They used an earlier birth
+transport, not the CLI creation mechanism now described in the README. Birds
+chose whether to create a peer, what it should know, and whom to introduce
+through ordinary messages.
 
 The isolated runner recorded 46 real-model scenario runs with model activity,
 totaling 554 model turns, 41 accepted births, and 17,554,340 input tokens, of
@@ -13,23 +15,77 @@ which 15,017,216 were cached. Additional direct lifecycle probes verified
 ancestor death and multigeneration independence. Every recorded disposable bird
 process was stopped.
 
-## Runtime boundary
+## Independent lifetimes
 
-`POST /hatch` accepts a plain-text bird ID and returns the new bird's ID and
-address. The child starts the same server, uses its own ignored `bird-<id>/`
-directory and persistent Codex conversation, begins with no private seed, and
-starts with only its parent as an initial peer.
+Each accepted birth in these trials started the same server in its own ignored
+`bird-<id>/` directory and persistent Codex conversation, with no private seed
+and only its parent as an initial peer. Its actual ID and address were returned
+to the requesting bird.
 
 The parent process does not own the child's lifetime. A real four-generation
 experiment created parent → child → grandchild, terminated the original parent,
 verified that the remaining birds independently recalled different private
-facts, and watched the orphan grandchild hatch and teach a great-grandchild.
+facts, and watched the orphan grandchild create and teach a great-grandchild.
 
-A local ceiling defaults to 32 retained child directories and can be configured
-with `HUMMINGBIRDS_HATCH_MAX_BIRDS`. Each directory is its own atomic birth
-reservation: competing parents cannot exceed the ceiling, and a rejected
-reservation is removed before any new process starts. No shared coordinator,
-process registry, or generation hierarchy is required.
+The historical birth path defaulted to a ceiling of 32 retained child
+directories. Each directory acted as an atomic birth reservation: competing
+parents could not exceed the ceiling, and a rejected reservation was removed
+before any new process started. No shared coordinator, process registry, or
+generation hierarchy was required.
+
+A separate 2026-08-27 mechanism check verified ordinary CLI creation and startup
+through scoped rules on macOS and Linux, including independent descendants,
+same-thread restart, and ordinary-tool write boundaries. Those trials used
+exact rules for named disposable birds, not the current arbitrary-ID rules or
+another specialization comparison. Evidence is in ignored
+`logs/scoped-cli-birth-2026-08-27/README.md`.
+
+The production-shaped CLI integration was then tested in one lineage scenario
+on each of macOS and Linux: seven real-model turns per platform, two independently
+created descendants, successful recall after ancestor shutdown, and same-thread
+recall after the grandchild's own restart. Ordinary writes to the runtime and
+generated rules were denied, and all 40 macOS and 63 Linux captured process
+identities exited naturally. This used the current arbitrary-ID rules and shared
+creation limit. An initial command quoting failure was diagnosed and corrected
+before the successful run. These are lifecycle checks, not new specialization
+results. Evidence and limitations are in ignored
+`logs/cli-birth-integration-2026-08-27/README.md`.
+
+## August 27 CLI behavior check
+
+Five fresh workload cases on 2026-08-27 used the then-production capability-only prompt,
+synthetic facts, and random UUID request IDs. None created a bird during ordinary
+traffic. After the same broad organizational-review cue used historically:
+
+- Two mixed-topic cases coordinated human callers without attempting a birth.
+- One coherent-topic control shared a checklist without creating another bird.
+- One existing-peer case reused gardening and astronomy peers selectively.
+- One mixed-topic case, additionally told that its human inboxes were not bird
+  workers, chose to create astronomy specialist Astra and keep gardening itself.
+
+Astra was actually created and started through the ordinary CLI, taught via
+POST, then restarted alone after its parent stopped. It retained all taught
+astronomy facts on its own thread and reported garden facts as unknown, without
+consulting peers or other conversations.
+
+Two fresh pre-change controls used the same workloads and UUID-based runner:
+the plain mixed case made no birth attempt, while the topology-informed case
+created two useful specialists. Thus self-chosen specialization still works
+with the CLI. These small, adaptive trials do not establish spontaneous birth
+rates, equal reliability, or the isolated causal effect of the topology message.
+
+Failures matter too. The existing-peer case and one mixed repeat physically
+delivered messages but put routing fields in the body instead of HTTP headers,
+breaking harness correlation. The reused peers retained useful subsets, not all
+potentially relevant old facts. Astra's recall omitted its source's full address
+and topic. Useful specialization does not imply perfect protocol, handoff, or
+attribution behavior; no prompt fix was made during these tests.
+
+The current cases totaled 57 model turns; all 240 captured process identities
+exited without forced cleanup. The behavior cases ran on macOS; Linux separately
+verified the mechanism above. All outcomes, raw headers, source snapshots,
+native-call audits, and pre-change controls are preserved in ignored
+`logs/cli-birth-behavior-2026-08-27/README.md`.
 
 ## One real cascade changed the design
 
@@ -49,8 +105,9 @@ ceiling separately limits the consequences of any future model mistake.
 
 ## Specialization does not need a splitting rule
 
-The production prompt only discloses that local hatching exists. An extra
-general-purpose instruction was tested against otherwise identical scenarios:
+The capability-only prompt in these trials merely disclosed how to create a
+local peer. An extra general-purpose instruction was tested against otherwise
+identical scenarios:
 
 > Split when some coherent part of your knowledge, work, or relationships would
 > be more useful as its own independently addressable conversation.
@@ -63,9 +120,18 @@ Three matched mixed-topic repetitions per arm produced:
 | Capability plus splitting rule | 2, 2, 2 | 17, 17, 19 | 566,820 |
 
 Every run produced a useful specialist. An additional capability-only run
-created one astronomy bird while retaining gardening in its parent. The general
-rule was removed: it added words, encouraged a more uniform organizational
-shape, and was unnecessary for the observed behavior.
+created one astronomy bird while retaining gardening in its parent. At that
+stage, the general rule was removed: it added words, encouraged a more uniform
+organizational shape, and was unnecessary for the observed behavior. It was
+later adopted as a provisional policy in `a426003`, after the ordinary-traffic
+experiments and further matched repetitions; see [the later record](splitting-ordinary-traffic.md).
+
+These workloads included a broad organizational-review message. Sampled
+successful mixed cases split at that review, not during the preceding ordinary
+messages. The old runner also exposed semantic step names through descriptive
+request IDs. Those counts are not spontaneous-birth rates or controlled rates
+for the current UUID-based protocol; the labels are a possible confound, not a
+demonstrated cause.
 
 The birds chose multiple legitimate boundaries:
 
@@ -83,9 +149,9 @@ facts from their parent's conversation.
 
 ## Organization needs truthful topology, not more rules
 
-A preceding investigation used a temporary hosting peer before `/hatch`
-existed. Its results here describe organizational behavior, not the current
-endpoint, and are separate from the 46-run totals above.
+A preceding investigation used a temporary hosting peer. Its results here
+describe organizational behavior, not the later birth transport, and are
+separate from the 46-run totals above.
 
 A marginal-benefit instruction correctly suppressed an unnecessary split of one
 coherent specialty, but also suppressed a useful split of two distinct ones. The
@@ -103,7 +169,7 @@ splitting can remain conversational when their relevant facts are observable.
 
 ## Attention policy matters more than prompt detail
 
-In another earlier matched workload, both prompts correctly avoided hatching.
+In another earlier matched workload, both prompts correctly avoided new birds.
 The concise prompt took **20 turns and 545,983 input tokens**; an overly
 prescriptive prompt took **116 turns and 4,959,125 input tokens** because
 broadcasts and acknowledgments activated other birds. Equal birth counts hid
@@ -155,7 +221,7 @@ scenario checks passed; the flock eventually contained thirteen birds and used
   taking three turns and 33 seconds.
 - An unfamiliar materials lookup searched seven birds before finding its source,
   taking 199 seconds.
-- A newly hatched materials specialist independently recalled its assigned facts
+- A newly created materials specialist independently recalled its assigned facts
   in 15 seconds without contacting any other bird.
 - A later astronomy lookup avoided that unrelated specialist but still searched
   nine existing birds and took 324 seconds.
@@ -178,11 +244,11 @@ selectivity before remembered routes reliably converge.
 - Acknowledgment-only exchanges can still create unnecessary turns, and broad
   discovery can flood peers. Learned direct routes and interest-specific
   forwarding help but do not constitute a hard global traffic bound.
-- The local ceiling counts retained `bird-*` directories, not live operating
-  system processes. Stopped birds conservatively retain their slots while their
-  persistent state remains.
-- Loopback limits remote access to `/hatch`, but local callers share it. Real
-  cross-user isolation or publicly deployed hatching would need an actual
-  authorization and filesystem boundary.
+- The historical ceiling counted retained `bird-*` directories, not live
+  operating system processes. Stopped birds retained their slots while their
+  persistent state remained.
+- The earlier birth transport was loopback-only and shared among local callers.
+  These experiments did not establish cross-user isolation; public or
+  cross-user operation needs an actual authorization and filesystem boundary.
 - Splitting copies useful information through conversation; it does not erase
   the same information from its parent's existing context.
