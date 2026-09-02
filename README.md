@@ -31,15 +31,15 @@ Introduce birds through ordinary messages with their IDs and full addresses from
 
 `new` saves the host and listening interface; restarting doesn't change them. Children inherit them and get their own ports. Use `BIRDS_BIND` if the listening interface differs from the advertised host.
 
-Remote chat needs the chat machine's own reachable address for replies:
+To chat from another machine:
 
 ```sh
-BIRDS_HOST=10.0.0.22 birds chat 10.0.0.11:3001 --port 3002
+birds chat 10.0.0.11:3001
 ```
 
-`--port` fixes the reply inbox port; otherwise a free one is chosen. Named chat uses the bird's saved network settings unless overridden. Both machines must reach each other's bird and inbox ports, including children's ports. There's no NAT traversal; alternatively, SSH to the server and chat there.
+Chat opens an outgoing connection and receives ordinary POSTed replies through an inbox on that server. No laptop address, listening port, or router configuration is needed. A short disconnect can replay buffered replies; exiting chat deletes its inbox, and server restarts lose inboxes. Bird-to-bird communication still requires reachable bird ports, including children's ports.
 
-Use a private network or restrict access with a firewall. There is no authentication or encryption: anyone who can reach these ports can send work and read conversations. Don't expose them openly to the Internet.
+Use a private network or restrict access with a firewall. Bird work and shared debug endpoints are unauthenticated, and connections are plain HTTP unless you provide HTTPS. Anyone who can reach them can send work and read conversations; don't expose them openly to the Internet.
 
 ## Manage local birds
 

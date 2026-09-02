@@ -21,13 +21,6 @@ export function localOrigin(bird: Network & { port: number }): string {
   return httpOrigin(host, bird.port)
 }
 
-export function isLoopbackHost(host: string): boolean {
-  const value = hostname(host)
-  return value === "localhost" || value.endsWith(".localhost") || value === "::1"
-    || (isIP(value) === 4 && value.startsWith("127."))
-    || /^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(value)
-}
-
 function hostname(value: string): string {
   if (typeof value !== "string") throw new Error("Bird hosts must be IPs or hostnames, without a port or URL path.")
   const bare = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value

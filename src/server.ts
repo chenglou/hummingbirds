@@ -9,6 +9,7 @@
 // own time, and the bird POSTs whatever it has to say to the message's x-reply-to address.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs"
 import { dirname, join, resolve } from "path"
+import { createInboxes } from "./inbox.ts"
 import { cliCommand, codexCommand, readBird, writeBird } from "./local"
 import { httpOrigin } from "./network.ts"
 
@@ -54,13 +55,19 @@ let queue: Promise<unknown> = Promise.resolve()
 let stopping = false
 const token = crypto.randomUUID()
 const runPath = join(directory, "run.json")
+const inboxes = createInboxes()
 
 const server = Bun.serve({
   hostname: bird.bind,
   idleTimeout: 0,
   port: bird.port,
   fetch: (request) => {
-    switch (new URL(request.url).pathname) {
+    const path = new URL(request.url).pathname
+    if (path === "/inboxes" || path.startsWith("/inboxes/")) {
+      if (stopping && path === "/inboxes") return new Response("Bird is stopping.", { status: 503 })
+      return inboxes.handle(request)
+    }
+    switch (path) {
       case "/control":
         return control(request)
       case "/events":
@@ -132,6 +139,7 @@ function shutdown(): void {
 }
 
 function finishShutdown(): void {
+  inboxes.close()
   for (const subscriber of subscribers) subscriber.close()
   subscribers.length = 0
   unlinkSync(runPath)

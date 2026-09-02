@@ -1,78 +1,36 @@
 import { createInterface } from "readline"
-import { httpOrigin, isLoopbackHost, networkSettings, type Network } from "./network.ts"
 
 type Peer = { address: string; id: string }
 type Turn = { callerId: string; replyTo: string | null }
+class ChatProtocolError extends Error {}
 
-export async function chat(target: string, options: Partial<Network> & { port?: number } = {}): Promise<void> {
+export async function chat(target: string): Promise<void> {
   const origin = destination(target)
-  const network = networkSettings(options.host, options.bind)
-  const port = options.port ?? 0
-  if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
-    throw new Error("Chat callback port must be an integer from 0 to 65535.")
-  }
-  if (!isLoopbackHost(origin.hostname) && isLoopbackHost(network.host)) {
-    throw new Error("Remote birds cannot reach a loopback chat callback. Set BIRDS_HOST to this machine's reachable address.")
-  }
   const address = new URL("/ask", origin).href
-  const events = new URL("/events", origin).href
-  const abort = new AbortController()
-  const response = await fetch(events, { signal: abort.signal })
-  if (!response.ok || response.body === null) {
-    abort.abort()
-    throw new Error(!response.ok
-      ? `${events} returned ${response.status}`
-      : `${events} did not provide an event stream`)
+  const created = await fetch(new URL("/inboxes", origin), { method: "POST", signal: AbortSignal.timeout(10_000) })
+  if (!created.ok) {
+    throw new Error(created.status === 404
+      ? "This bird does not support hosted reply inboxes. Update its installation and restart it."
+      : `Could not open a reply inbox (${created.status}): ${await created.text()}`)
   }
+  const inbox: unknown = await created.json().catch(() => null)
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  if (typeof inbox !== "object" || inbox === null
+    || !("id" in inbox) || typeof inbox.id !== "string" || !uuid.test(inbox.id)
+    || !("token" in inbox) || typeof inbox.token !== "string" || !uuid.test(inbox.token)) {
+    throw new Error("The server returned an invalid reply inbox.")
+  }
+  const inboxURL = new URL(`/inboxes/${inbox.id}`, origin)
+  const inboxAddress = `${inboxURL.href}/ask`
+  const authorization = `Bearer ${inbox.token}`
+  const abort = new AbortController()
 
   const interactive = process.stdout.isTTY === true && process.stdin.isTTY === true
   const peers: Peer[] = []
   let nodeId = "bird"
   let active: Turn | null = null
-
-  let inbox: ReturnType<typeof Bun.serve>
-  try {
-    inbox = Bun.serve({
-      hostname: network.bind,
-      port,
-      async fetch(request) {
-        if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
-          return new Response("POST a plain-text message to /ask", { status: 404 })
-        }
-        const incomingRequest = request.headers.get("x-request")
-        const inReplyTo = request.headers.get("x-in-reply-to")
-        if (incomingRequest !== null && inReplyTo !== null) {
-          return new Response("Send either x-request or x-in-reply-to, not both.", { status: 400 })
-        }
-        const requestId = incomingRequest ?? inReplyTo ?? crypto.randomUUID()
-        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
-          return new Response("Request IDs must be canonical UUIDs.", { status: 400 })
-        }
-        const question = await request.text()
-        if (question.trim() === "") return new Response("Empty message.", { status: 400 })
-
-        const callerId = request.headers.get("x-from") ?? "unknown"
-        render(formatMessage(callerId, question, callerId))
-        return new Response("Accepted by human.", {
-          status: 202,
-          headers: {
-            "content-type": "text/plain; charset=utf-8",
-            "x-request": requestId,
-          },
-        })
-      },
-    })
-  } catch (error) {
-    abort.abort()
-    throw error
-  }
-  const inboxPort = inbox.port
-  if (inboxPort === undefined) {
-    abort.abort()
-    await inbox.stop(true)
-    throw new Error("Could not determine the chat callback port.")
-  }
-  const inboxAddress = new URL("/ask", httpOrigin(network.host, inboxPort)).href
+  let after = 0
+  let streamError: unknown = null
   const background = 101 + Number(Bun.hash.wyhash("human") % 6n)
   const input = createInterface({
     input: process.stdin,
@@ -81,20 +39,23 @@ export async function chat(target: string, options: Partial<Network> & { port?: 
     terminal: interactive,
   })
 
+  const stop = () => {
+    abort.abort()
+    input.close()
+  }
+  input.on("SIGINT", stop)
+  process.on("SIGINT", stop)
+  process.on("SIGTERM", stop)
+  process.on("SIGHUP", stop)
   if (interactive) {
-    input.on("SIGINT", () => input.close())
     input.prompt()
   }
-  const streaming = readEvents(response.body)
-    .then(() => {
-      if (!abort.signal.aborted) input.close()
-    })
-    .catch((error: unknown) => {
-      if (!abort.signal.aborted) {
-        console.error(error)
-        input.close()
-      }
-    })
+  const streaming = Promise.all([follow("events"), follow("inbox")]).catch((error: unknown) => {
+    if (!abort.signal.aborted) {
+      streamError = error
+      stop()
+    }
+  })
 
   try {
     for await (const line of input) {
@@ -106,32 +67,113 @@ export async function chat(target: string, options: Partial<Network> & { port?: 
             "x-reply-to": inboxAddress,
           },
           body: line,
+          signal: abort.signal,
         })
         if (!sent.ok) throw new Error(`${address} returned ${sent.status}: ${await sent.text()}`)
       }
       if (interactive) render("")
     }
+  } catch (error) {
+    if (!abort.signal.aborted) throw error
   } finally {
-    input.close()
-    abort.abort()
+    stop()
     await streaming
-    await inbox.stop(true)
+    process.off("SIGINT", stop)
+    process.off("SIGTERM", stop)
+    process.off("SIGHUP", stop)
+    try {
+      await fetch(inboxURL, { method: "DELETE", headers: { authorization }, signal: AbortSignal.timeout(2000) })
+    } catch {
+      // A disconnected inbox expires on the server even if cleanup cannot reach it.
+    }
+  }
+  if (streamError !== null) throw streamError
+
+  async function follow(kind: "inbox" | "events"): Promise<void> {
+    let disconnectedAt: number | null = null
+    while (!isStopped()) {
+      const connection = new AbortController()
+      let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => connection.abort(), 10_000)
+      try {
+        const url = kind === "inbox" ? `${inboxURL.href}/events?after=${after}` : new URL("/events", origin)
+        const response = await fetch(url, {
+          headers: kind === "inbox" ? { authorization } : {},
+          signal: AbortSignal.any([abort.signal, connection.signal]),
+        })
+        clearTimeout(timeout)
+        if (!response.ok) {
+          const error = kind === "inbox" && response.status === 404
+            ? "Reply inbox expired or the server restarted. Start a new chat."
+            : kind === "inbox" && response.status === 409
+              ? "Reply inbox buffer was exceeded; some replies may be missing. Start a new chat."
+              : `${kind} stream returned ${response.status}`
+          if (response.status < 500) throw new ChatProtocolError(error)
+          throw new Error(error)
+        }
+        if (response.body === null) throw new ChatProtocolError(`${kind} did not provide an event stream`)
+        if (kind === "inbox") timeout = setTimeout(() => connection.abort(), 45_000)
+        const decoder = new TextDecoder()
+        let pending = ""
+        for await (const chunk of response.body) {
+          clearTimeout(timeout)
+          if (kind === "inbox") timeout = setTimeout(() => connection.abort(), 45_000)
+          disconnectedAt = null
+          pending += decoder.decode(chunk, { stream: true })
+          let newline = pending.indexOf("\n")
+          while (newline >= 0) {
+            const line = pending.slice(0, newline)
+            if (kind === "inbox") deliver(line)
+            else display(line)
+            pending = pending.slice(newline + 1)
+            newline = pending.indexOf("\n")
+          }
+        }
+        // Incomplete lines belong to this connection. Replayed inbox messages start
+        // after the last fully displayed sequence number, never a partial chunk.
+      } catch (error) {
+        if (error instanceof ChatProtocolError) throw error
+        if (abort.signal.aborted) return
+      } finally {
+        clearTimeout(timeout)
+        connection.abort()
+      }
+      if (abort.signal.aborted) return
+      if (disconnectedAt === null) {
+        disconnectedAt = Date.now()
+        console.error(`${kind === "inbox" ? "Reply" : "Bird event"} stream disconnected; reconnecting…`)
+      }
+      if (Date.now() - disconnectedAt >= 5 * 60 * 1000) {
+        throw new Error("Could not reconnect to the bird. Start a new chat when it is reachable.")
+      }
+      await Bun.sleep(500)
+    }
   }
 
-  async function readEvents(stream: ReadableStream<Uint8Array>): Promise<void> {
-    const decoder = new TextDecoder()
-    let pending = ""
-    for await (const chunk of stream) {
-      pending += decoder.decode(chunk, { stream: true })
-      let newline = pending.indexOf("\n")
-      while (newline >= 0) {
-        display(pending.slice(0, newline))
-        pending = pending.slice(newline + 1)
-        newline = pending.indexOf("\n")
-      }
+  function isStopped(): boolean {
+    return abort.signal.aborted
+  }
+
+  function deliver(line: string): void {
+    if (line === "") return
+    let message: unknown
+    try { message = JSON.parse(line) } catch { throw new ChatProtocolError("Invalid reply stream.") }
+    if (typeof message !== "object" || message === null || !("type" in message)) {
+      throw new ChatProtocolError("Invalid reply stream.")
     }
-    pending += decoder.decode()
-    if (pending !== "") display(pending)
+    if (message.type === "closed") {
+      stop()
+      return
+    }
+    if (message.type !== "message"
+      || !("seq" in message) || typeof message.seq !== "number" || !Number.isSafeInteger(message.seq) || message.seq < 1
+      || !("from" in message) || typeof message.from !== "string"
+      || !("body" in message) || typeof message.body !== "string") {
+      throw new ChatProtocolError("Invalid reply stream.")
+    }
+    if (message.seq <= after) return
+    if (message.seq !== after + 1) throw new ChatProtocolError("Reply stream skipped a message. Start a new chat.")
+    render(formatMessage(message.from, message.body, message.from))
+    after = message.seq
   }
 
   function display(line: string): void {

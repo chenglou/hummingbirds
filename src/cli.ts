@@ -17,14 +17,14 @@ import { httpOrigin, localOrigin, networkSettings } from "./network.ts"
 const usage = `Usage:
   birds new <id> [--port N]
   birds start <id> [--detach]
-  birds chat <id | port | host:port | URL> [--port N]
+  birds chat <id | port | host:port | URL>
   birds stop <id>
   birds list
 
 Birds live in ~/.birds (override with BIRDS_HOME).
 Set BIRDS_HOST to this machine's reachable IP or hostname for networking.
 BIRDS_BIND overrides the listening interface; both are saved by new.
-Chat uses these settings for its reply inbox; --port fixes its port.
+Chat receives replies through the bird's server; no local listening port is needed.
 Start stays in the foreground unless --detach is given.
 Stop drains accepted work and preserves memory.`
 
@@ -86,26 +86,15 @@ try {
         break
       }
       case "chat": {
-        const { positionals, values } = parseArgs({
-          args,
-          allowPositionals: true,
-          options: { port: { type: "string" } },
-        })
-        const target = oneArgument(positionals)
-        const port = portOption(values.port)
-        const host = Bun.env["BIRDS_HOST"]
-        const bind = Bun.env["BIRDS_BIND"]
+        const target = oneArgument(args)
         if (/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(target)
           && existsSync(join(birdDirectory(target), "bird.json"))) {
           const bird = readBird(birdDirectory(target))
           const status = await birdStatus(bird)
           if (status !== "running") throw new Error(`${bird.id} is ${status}. Start it with birds start ${bird.id}.`)
-          await chat(localOrigin(bird), {
-            port,
-            ...networkSettings(host ?? bird.host, bind ?? (host === undefined ? bird.bind : undefined)),
-          })
+          await chat(localOrigin(bird))
         } else if (/^\d+$/.test(target) || target.includes(":") || target.includes(".")) {
-          await chat(target, { port, ...networkSettings(host, bind) })
+          await chat(target)
         } else {
           throw new Error(`Unknown local bird: ${target}. Use birds list.`)
         }

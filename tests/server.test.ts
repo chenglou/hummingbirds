@@ -307,8 +307,10 @@ describe("Hummingbirds", () => {
         throw new Error("Typed message did not provide a return address")
       }
       const humanUrl = new URL(humanAddress)
-      expect([humanUrl.hostname, humanUrl.pathname]).toEqual(["127.0.0.1", "/ask"])
-      expect(humanUrl.port).not.toBe(new URL(bird.url).port)
+      expect(humanUrl.origin).toBe(new URL(bird.url).origin)
+      expect(humanUrl.pathname).toMatch(
+        /^\/inboxes\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/ask$/i,
+      )
       await waitUntil(async () => {
         return (Bun.stripANSI(output).split(/[\r\n]/).at(-1) ?? "").includes(" You ")
       })
@@ -463,6 +465,10 @@ describe("Hummingbirds", () => {
       ])
       expect(output).not.toContain('"requestId":"q-empty-human"')
       expect(output).not.toContain('{"')
+
+      child.kill()
+      expect(await child.exited).toBe(0)
+      expect((await fetch(humanAddress, { method: "POST", body: "After chat closed." })).status).toBe(404)
     } finally {
       if (child.exitCode === null) child.kill()
       await child.exited
@@ -472,7 +478,109 @@ describe("Hummingbirds", () => {
     }
   }, 15_000)
 
-  test("attaches by port, host, or HTTP origin through the CLI", async () => {
+  test("keeps simultaneous chats' hosted replies separate across delayed peer answers", async () => {
+    const directory = join(await makeTemporaryDirectory(), "simultaneous")
+    const peer = startInbox()
+    const bird = await startBird(directory, {
+      HUMMINGBIRDS_FAKE_DELAY_MS: "100",
+      HUMMINGBIRDS_PEERS: `- b at ${peer.url}`,
+    })
+    let firstOutput = ""
+    let secondOutput = ""
+    const first = startChat(directory, new URL(bird.url).port, (chunk) => {
+      firstOutput += chunk
+    })
+    const second = startChat(directory, new URL(bird.url).port, (chunk) => {
+      secondOutput += chunk
+    })
+    const firstTerminal = first.terminal
+    const secondTerminal = second.terminal
+    if (firstTerminal === undefined || secondTerminal === undefined) {
+      throw new Error("Chat did not start in a terminal")
+    }
+
+    try {
+      await waitUntil(async () => {
+        return Bun.stripANSI(firstOutput).includes(" You ") && Bun.stripANSI(secondOutput).includes(" You ")
+      })
+      const firstQuestion = "What does b know about Nacre-A?"
+      const secondQuestion = "What does b know about Nacre-B?"
+      firstTerminal.write(`${firstQuestion}\n`)
+      secondTerminal.write(`${secondQuestion}\n`)
+      await waitUntil(async () => peer.messages.length === 2)
+      const trace = await events(bird)
+      const firstQuestionEvent = trace.find((event) => event.kind === "received" && event.question === firstQuestion)
+      const secondQuestionEvent = trace.find((event) => event.kind === "received" && event.question === secondQuestion)
+      if (firstQuestionEvent === undefined || secondQuestionEvent === undefined
+        || firstQuestionEvent.replyTo === null || secondQuestionEvent.replyTo === null) {
+        throw new Error("Each chat must provide its own return address")
+      }
+      expect(firstQuestionEvent.replyTo).not.toBe(secondQuestionEvent.replyTo)
+      expect(firstQuestionEvent.requestId).not.toBe(secondQuestionEvent.requestId)
+      for (const address of [firstQuestionEvent.replyTo, secondQuestionEvent.replyTo]) {
+        expect(new URL(address).origin).toBe(new URL(bird.url).origin)
+      }
+      for (const [event, question] of [[firstQuestionEvent, firstQuestion], [secondQuestionEvent, secondQuestion]] as const) {
+        expect(peer.messages.find((message) => message.request === event.requestId)?.body).toBe(question)
+      }
+
+      for (const [question, body] of [
+        [secondQuestionEvent, "Nacre-B: Violet Shoal-862."],
+        [firstQuestionEvent, "Nacre-A: Amber Tern-417."],
+      ] as const) {
+        const response = await fetch(bird.url, {
+          method: "POST",
+          headers: {
+            "x-from": "b",
+            "x-in-reply-to": question.requestId,
+            "x-reply-to": peer.url,
+            "x-route": JSON.stringify([bird.url, peer.url]),
+          },
+          body,
+        })
+        expect(response.status).toBe(202)
+      }
+      await waitUntil(async () => {
+        return Bun.stripANSI(firstOutput).includes("simultaneous  Nacre-A: Amber Tern-417.")
+          && Bun.stripANSI(secondOutput).includes("simultaneous  Nacre-B: Violet Shoal-862.")
+          && (await events(bird)).filter((event) => event.kind === "completed").length === 4
+      })
+      const deliveries = (output: string) => [...output.replaceAll("\u001b", "ESC").matchAll(/ESC\[30;10[1-6]m simultaneous ESC\[0m ([^\r\n]+)/g)]
+        .map((match) => match[1])
+      expect(deliveries(firstOutput)).toEqual(["Nacre-A: Amber Tern-417."])
+      expect(deliveries(secondOutput)).toEqual(["Nacre-B: Violet Shoal-862."])
+      for (const output of [firstOutput, secondOutput]) {
+        expect(Bun.stripANSI(output)).toContain("← b  Nacre-A: Amber Tern-417.")
+        expect(Bun.stripANSI(output)).toContain("← b  Nacre-B: Violet Shoal-862.")
+        expect(output).not.toContain('{"')
+      }
+
+      first.kill()
+      expect(await first.exited).toBe(0)
+      expect((await fetch(firstQuestionEvent.replyTo, { method: "POST", body: "Closed inbox." })).status).toBe(404)
+      const finalDelivery = await fetch(secondQuestionEvent.replyTo, {
+        method: "POST",
+        headers: { "x-from": "b", "x-in-reply-to": secondQuestionEvent.requestId },
+        body: "The other inbox is still available.",
+      })
+      expect(finalDelivery.status).toBe(202)
+      await waitUntil(async () => Bun.stripANSI(secondOutput).includes("b  The other inbox is still available."))
+      expect(firstOutput).not.toContain("The other inbox is still available.")
+      secondTerminal.write("\u0003")
+      expect(await second.exited).toBe(0)
+      expect((await fetch(secondQuestionEvent.replyTo, { method: "POST", body: "Closed inbox." })).status).toBe(404)
+    } finally {
+      if (first.exitCode === null) first.kill()
+      if (second.exitCode === null) second.kill()
+      await Promise.all([first.exited, second.exited])
+      firstTerminal.close()
+      secondTerminal.close()
+      await stopBird(bird)
+      peer.stop()
+    }
+  }, 15_000)
+
+  test("attaches by port, host, or HTTP origin without laptop callback settings", async () => {
     const bird = await startBird(join(await makeTemporaryDirectory(), "destinations"))
     const port = new URL(bird.url).port
     const destinations = [port, `localhost:${port}`, `http://127.0.0.1:${port}`]
@@ -508,6 +616,15 @@ describe("Hummingbirds", () => {
       })
       expect(await invalid.exited).not.toBe(0)
       expect(await new Response(invalid.stderr).text()).toContain("without /ask or /events")
+
+      const obsoletePort = Bun.spawn([process.execPath, "run", resolve("src/cli.ts"), "chat", port, "--port", "50533"], {
+        cwd: bird.directory,
+        env: { ...Bun.env, BIRDS_HOME: bird.directory },
+        stderr: "pipe",
+        stdout: "ignore",
+      })
+      expect(await obsoletePort.exited).not.toBe(0)
+      expect(await new Response(obsoletePort.stderr).text()).toContain("--port")
     } finally {
       await stopBird(bird)
     }
@@ -907,18 +1024,24 @@ describe("Hummingbirds", () => {
       const [code, stdout, stderr] = await Promise.all([
         child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
       ])
-      expect({ code, stderr }).toEqual({ code: 0, stderr: "" })
+      expect(code).toBe(0)
+      const helperWarning = `WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir ${JSON.stringify(tmpdir())} (codex_home: AbsolutePathBuf(${JSON.stringify(codexHome)}))\n`
+      expect(process.platform === "linux" ? ["", helperWarning] : [""]).toContain(stderr)
       const results = JSON.parse(stdout) as Record<string, string | null>
       expect(results["workspace"]).toBeNull()
       expect(results["temporary"]).toBeNull()
-      for (const action of ["new-rule", "config-overwrite", "policy-rename"]) {
+      for (const action of ["new-rule", "config-overwrite"]) {
         expect(results[action]).toMatch(/^(EPERM|EACCES|EROFS)$/)
       }
+      expect(results["policy-rename"]).toMatch(process.platform === "linux"
+        ? /^(EPERM|EACCES|EROFS|EBUSY)$/
+        : /^(EPERM|EACCES|EROFS)$/)
       expect(await readFile(join(workspace, "ordinary.txt"), "utf8")).toBe("ok")
       expect(await readFile(temporaryWrite, "utf8")).toBe("ok")
       expect(await readFile(configPath, "utf8")).toBe(config)
       expect(await readFile(rulesPath, "utf8")).toBe(rules)
       expect(await Bun.file(join(workspace, ".codex", "rules", "added.rules")).exists()).toBe(false)
+      expect(await Bun.file(join(workspace, ".codex-moved", "config.toml")).exists()).toBe(false)
     } finally {
       await stopBird(bird)
     }
@@ -1140,7 +1263,8 @@ function startChat(
     [process.execPath, "run", resolve("src/cli.ts"), "chat", destination],
     {
       cwd: directory,
-      env: { ...Bun.env, BIRDS_HOME: directory, BIRDS_HOST: undefined, BIRDS_BIND: undefined },
+      // Old server settings must not make a laptop try to bind or advertise a callback.
+      env: { ...Bun.env, BIRDS_HOME: directory, BIRDS_HOST: "old-callback.invalid", BIRDS_BIND: "192.0.2.1" },
       terminal: {
         cols: 120,
         rows: 24,
