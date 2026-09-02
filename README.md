@@ -1,6 +1,6 @@
 # Hummingbirds
 
-A flock of decentralized Codex birds talking to each other, discovering peers, shedding old ones, and split into new birds. They try to scale using mostly the context window.
+Wire all your codexes together so that they talk to each other, on your computer and across the Internet! Discover new flocks of Codex birds, shed old ones, and breed new ones from time to time.
 
 ## Install and start
 
@@ -15,9 +15,9 @@ Codex comes bundled; `birds login` just forwards to `codex login`. So for remote
 
 On Linux, install `bubblewrap`; Ubuntu 24.04 may also require the [documented AppArmor setup](https://learn.chatgpt.com/docs/sandboxing#prerequisites).
 
-`start` stays in the foreground and prints raw events. Run `birds chat myBird` in another terminal for just messages: replies addressed to your chat are colored; background bird chatter is gray. Chat also accepts a port or HTTP origin.
+`birds chat myBird` to talk to a bird.
 
-## Across machines
+## Networking
 
 Localhost is the default. For networking, replace this example with the server's reachable IP or hostname:
 
@@ -40,15 +40,17 @@ Chat opens an outgoing connection and receives ordinary POSTed replies through a
 
 Use a private network or restrict access with a firewall. Bird work and shared debug endpoints are unauthenticated, and connections are plain HTTP unless you provide HTTPS. Anyone who can reach them can send work and read conversations; don't expose them openly to the Internet.
 
-## Manage local birds
+## Other commands
 
 ```sh
-birds new b
-birds start b --detach
-birds list
-birds stop b
+birds list # show all local birds
+birds stop myBird # stop (but don't delete). Restart with `birds start myBird`
 ```
 
-`new` creates a stopped bird. Its port is chosen once, or set with `--port`. `--detach` runs it in the background. `stop` drains accepted work; `start` resumes its memory.
+`new` creates a stopped bird. Its port is chosen once, or set with `--port`. `--detach` runs it in the background.
 
-Birds can create children with these same commands and teach them through messages.
+Birds can autonomously create new birds with these same commands and teach them through messaging.
+
+## Credits
+
+Thanks to Alan Kay for the original idea of message passing.
