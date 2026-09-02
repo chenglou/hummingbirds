@@ -92,6 +92,61 @@ describe("Hummingbirds", () => {
     }
   })
 
+  test("keeps quiet event streams alive without logging heartbeats or leaking the timer", async () => {
+    const root = await makeTemporaryDirectory()
+    const entrypoint = join(root, "fast-heartbeats.ts")
+    await writeFile(entrypoint, `
+      const schedule = globalThis.setInterval
+      let intervals = 0
+      globalThis.setInterval = (callback, delay, ...args) => {
+        if (delay !== 15_000 || ++intervals !== 1) throw new Error("Expected one 15-second heartbeat timer")
+        return schedule(callback, 50, ...args)
+      }
+      await import(${JSON.stringify(serverPath)})
+    `)
+    const bird = await startBird(join(root, "quiet"), {}, [], entrypoint)
+    const abort = new AbortController()
+    const decoder = new TextDecoder()
+
+    async function subscribe(): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+      const response = await fetch(new URL("/events", bird.url), {
+        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(3000)]),
+      })
+      expect(response.status).toBe(200)
+      expect(response.headers.get("content-type")).toContain("application/x-ndjson")
+      expect(response.headers.get("cache-control")).toBe("no-store")
+      if (response.body === null) throw new Error("Bird did not provide an event stream")
+      return response.body.getReader()
+    }
+
+    try {
+      const [first, second] = await Promise.all([subscribe(), subscribe()])
+      for (const stream of [first, second]) {
+        expect(JSON.parse(decoder.decode((await stream.read()).value).trim())).toEqual({
+          id: bird.id, pid: bird.process.pid, url: bird.url,
+        })
+      }
+      for (const stream of [first, second]) {
+        expect(decoder.decode((await stream.read()).value)).toMatch(/^\n+$/)
+      }
+      await first.cancel()
+      await Bun.sleep(100)
+      expect(decoder.decode((await second.read()).value)).toMatch(/^\n+$/)
+      expect(bird.process.exitCode).toBeNull()
+      expect(await Bun.file(join(bird.directory, "bird", "events.jsonl")).exists()).toBe(false)
+
+      bird.process.kill()
+      await waitUntil(async () => bird.process.exitCode !== null)
+      expect(await bird.process.exited).toBe(0)
+      expect(await readRemainingOutput(bird.process.stdout)).toBe("")
+      expect(await new Response(bird.process.stderr).text()).toBe("")
+    } finally {
+      abort.abort()
+      if (bird.process.exitCode === null) bird.process.kill("SIGKILL")
+      await bird.process.exited
+    }
+  }, 10_000)
+
   test("starts a bird, streams its conversation, and resumes after a restart", async () => {
     const directory = join(await makeTemporaryDirectory(), "bird")
     let bird: Bird | null = null

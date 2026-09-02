@@ -93,7 +93,11 @@ export async function chat(target: string): Promise<void> {
     let disconnectedAt: number | null = null
     while (!isStopped()) {
       const connection = new AbortController()
-      let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(() => connection.abort(), 10_000)
+      let lastDataAt: number | null = null
+      let reason = "Stream ended."
+      let timeout: ReturnType<typeof setTimeout> | undefined = setTimeout(
+        () => connection.abort(new Error("Timed out waiting for stream headers (10s)")), 10_000,
+      )
       try {
         const url = kind === "inbox" ? `${inboxURL.href}/events?after=${after}` : new URL("/events", origin)
         const response = await fetch(url, {
@@ -111,12 +115,17 @@ export async function chat(target: string): Promise<void> {
           throw new Error(error)
         }
         if (response.body === null) throw new ChatProtocolError(`${kind} did not provide an event stream`)
-        if (kind === "inbox") timeout = setTimeout(() => connection.abort(), 45_000)
+        if (kind === "inbox") timeout = setTimeout(
+          () => connection.abort(new Error("No reply-stream data received for 45s")), 45_000,
+        )
         const decoder = new TextDecoder()
         let pending = ""
         for await (const chunk of response.body) {
           clearTimeout(timeout)
-          if (kind === "inbox") timeout = setTimeout(() => connection.abort(), 45_000)
+          if (kind === "inbox") timeout = setTimeout(
+            () => connection.abort(new Error("No reply-stream data received for 45s")), 45_000,
+          )
+          lastDataAt = Date.now()
           disconnectedAt = null
           pending += decoder.decode(chunk, { stream: true })
           let newline = pending.indexOf("\n")
@@ -133,6 +142,10 @@ export async function chat(target: string): Promise<void> {
       } catch (error) {
         if (error instanceof ChatProtocolError) throw error
         if (abort.signal.aborted) return
+        reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+        if (error instanceof Error && "code" in error && (typeof error.code === "string" || typeof error.code === "number")) {
+          reason += ` (code ${error.code})`
+        }
       } finally {
         clearTimeout(timeout)
         connection.abort()
@@ -140,7 +153,8 @@ export async function chat(target: string): Promise<void> {
       if (abort.signal.aborted) return
       if (disconnectedAt === null) {
         disconnectedAt = Date.now()
-        console.error(`${kind === "inbox" ? "Reply" : "Bird event"} stream disconnected; reconnecting…`)
+        const quiet = lastDataAt === null ? "no data received" : `${disconnectedAt - lastDataAt}ms since last data`
+        console.error(`[${new Date(disconnectedAt).toISOString()}] ${kind === "inbox" ? "Reply" : "Bird event"} stream disconnected; reconnecting… ${JSON.stringify(reason)} (${quiet})`)
       }
       if (Date.now() - disconnectedAt >= 5 * 60 * 1000) {
         throw new Error("Could not reconnect to the bird. Start a new chat when it is reachable.")

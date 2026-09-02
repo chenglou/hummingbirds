@@ -132,6 +132,12 @@ if (existsSync(legacyThreadPath)) unlinkSync(legacyThreadPath)
 ready()
 const startup = `${JSON.stringify({ id: nodeId, pid: process.pid, url: address })}\n`
 emit(startup)
+const heartbeat = setInterval(() => {
+  const blank = encoder.encode("\n")
+  for (const subscriber of subscribers) {
+    if ((subscriber.desiredSize ?? 0) > 0) subscriber.enqueue(blank)
+  }
+}, 15_000)
 
 process.on("SIGINT", shutdown)
 process.on("SIGTERM", shutdown)
@@ -163,6 +169,7 @@ function shutdown(): void {
 }
 
 function finishShutdown(): void {
+  clearInterval(heartbeat)
   inboxes.close()
   for (const subscriber of subscribers) subscriber.close()
   subscribers.length = 0
@@ -184,7 +191,7 @@ function streamEvents(): Response {
     },
   })
   return new Response(stream, {
-    headers: { "content-type": "application/x-ndjson; charset=utf-8" },
+    headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" },
   })
 }
 

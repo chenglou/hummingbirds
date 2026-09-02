@@ -105,6 +105,69 @@ describe("hosted chat", () => {
     }
   })
 
+  test.each(["empty EOF", "EOF after data", "network error", "HTTP 503", "header timeout"] as const)("logs one safe, timestamped bird-stream disconnect and recovers after %s", async (failure) => {
+    let attempts = 0
+    const privateBody = "DO_NOT_LOG_RESPONSE_BODY"
+    const privateHeader = "DO_NOT_LOG_RESPONSE_HEADER"
+    const networkMessage = "Socket closed\nretry\x1b[31m"
+    const bird = fixture({ respond: (request) => {
+      if (new URL(request.url).pathname !== "/events" || ++attempts > 1) return null
+      switch (failure) {
+        case "empty EOF": return new Response("")
+        case "EOF after data": return new Response("\n")
+        case "network error":
+        case "header timeout": return null
+        case "HTTP 503": return new Response(privateBody, { status: 503, headers: { "x-private": privateHeader } })
+      }
+    } })
+    const intercepted = failure === "network error" || failure === "header timeout"
+    const client = launchChat(bird.origin, intercepted ? `
+      const nativeFetch = globalThis.fetch
+      if (${failure === "header timeout"}) {
+        const nativeSetTimeout = globalThis.setTimeout
+        globalThis.setTimeout = (callback, delay, ...args) => nativeSetTimeout(callback, delay === 10_000 ? 100 : delay, ...args)
+      }
+      let failed = false
+      globalThis.fetch = (target, options) => {
+        const url = new URL(target instanceof Request ? target.url : String(target))
+        if (!failed && url.pathname === "/events") {
+          failed = true
+          if (${failure === "header timeout"}) {
+            return new Promise((_, reject) => options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true }))
+          }
+          throw Object.assign(new TypeError(${JSON.stringify(networkMessage)}), {
+            code: "ECONNRESET", body: ${JSON.stringify(privateBody)},
+            headers: { authorization: ${JSON.stringify(privateHeader)} },
+          })
+        }
+        return nativeFetch(target, options)
+      }
+    ` : "")
+    try {
+      await waitUntil(() => client.output.stdout.includes("CHAT_READY"))
+      await client.child.stdin.end()
+      const result = await client.finished
+      expect(result.code).toBe(0)
+      expect(attempts).toBe(intercepted ? 1 : 2)
+      expect(result.stderr).toMatch(/^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] Bird event stream disconnected; reconnecting… .+\n$/)
+      expect(result.stderr.trimEnd().split("\n")).toHaveLength(1)
+      const reason = failure === "network error" ? `TypeError: ${networkMessage} (code ECONNRESET)`
+        : failure === "HTTP 503" ? "Error: events stream returned 503"
+          : failure === "header timeout" ? "Error: Timed out waiting for stream headers (10s)" : "Stream ended."
+      expect(result.stderr).toContain(JSON.stringify(reason))
+      expect(result.stderr).toMatch(failure === "EOF after data" ? /\(\d+ms since last data\)\n$/ : /\(no data received\)\n$/)
+      expect(result.stderr).not.toContain(privateBody)
+      expect(result.stderr).not.toContain(privateHeader)
+      const inbox = bird.allocations[0]
+      if (inbox === undefined) throw new Error("Missing hosted inbox")
+      expect(result.stderr).not.toContain(inbox.token)
+      expect(bird.allocations).toHaveLength(1)
+    } finally {
+      await stopChat(client)
+      await bird.close()
+    }
+  }, 10_000)
+
   test.each(["complete", "partial"] as const)("reconnects after a %s message without losing or duplicating replies", async (cut) => {
     const bird = fixture()
     const client = launchChat(bird.origin, `
@@ -152,7 +215,7 @@ describe("hosted chat", () => {
       await client.child.stdin.end()
       const result = await client.finished
       expect(result.code).toBe(0)
-      expect(result.stderr).toContain("Reply stream disconnected; reconnecting")
+      expect(result.stderr).toMatch(/^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\] Reply stream disconnected; reconnecting… "Stream ended\." \(\d+ms since last data\)\n$/)
       expect((await post(bird, inbox, "After EOF.")).status).toBe(404)
     } finally {
       await stopChat(client)
