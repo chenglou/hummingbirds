@@ -15,22 +15,21 @@ afterAll(async () => {
 })
 
 describe("birds", () => {
-  test("creates separate stopped birds, resolves local peers, and isolates homes", async () => {
+  test("creates separate stopped birds with explicit bootstrap data and isolates homes", async () => {
     const home = await makeHome()
     const first = await command(home, ["new", "b"], { HUMMINGBIRDS_SEED: "B-ONLY-FACT-71" })
     expect(first.code).toBe(0)
     expect(first.stdout).toContain("Created b.")
 
-    const second = await command(home, ["new", "a", "--peer", "b"])
+    const b = await metadata(home, "b")
+    const peers = `- b at http://127.0.0.1:${b.port}/ask`
+    const second = await command(home, ["new", "a"], { HUMMINGBIRDS_PEERS: peers })
     expect(second.code).toBe(0)
     const a = await metadata(home, "a")
-    const b = await metadata(home, "b")
     expect(a.port).not.toBe(b.port)
     expect(await Bun.file(join(home, "a", "run.json")).exists()).toBe(false)
     expect(await Bun.file(join(home, "b", "run.json")).exists()).toBe(false)
-    expect(await readFile(join(home, "a", "workspace", "AGENTS.md"), "utf8")).toContain(
-      `- b at http://127.0.0.1:${b.port}/ask`,
-    )
+    expect(await readFile(join(home, "a", "workspace", "AGENTS.md"), "utf8")).toContain(peers)
     expect(await readFile(join(home, "b", "workspace", "AGENTS.md"), "utf8")).toContain(
       "B-ONLY-FACT-71",
     )
@@ -62,6 +61,11 @@ describe("birds", () => {
     expect((await command(otherHome, ["list"])).stdout).not.toContain(`:${a.port}/ask`)
     const help = await command(home, ["--help"])
     expect(help.code).toBe(0)
+    expect(help.stdout).not.toContain("--peer")
+    const unsupported = await command(home, ["new", "unsupported", "--peer", "b"])
+    expect(unsupported.code).not.toBe(0)
+    expect(unsupported.stderr).toContain("Unknown option")
+    expect(await readdir(home)).not.toContain("unsupported")
     expect(help.stdout).not.toContain("birds kill")
     const removed = await command(home, ["kill", "a"])
     expect(removed.code).not.toBe(0)
@@ -80,6 +84,8 @@ describe("birds", () => {
       env: {
         ...Bun.env,
         BIRDS_HOME: home,
+        BIRDS_HOST: undefined,
+        BIRDS_BIND: undefined,
         HUMMINGBIRDS_MAX_BIRDS: undefined,
         HUMMINGBIRDS_PEERS: undefined,
         HUMMINGBIRDS_SEED: undefined,
@@ -135,6 +141,68 @@ describe("birds", () => {
     expect(await readFile(join(home, "shared", "bird.json"), "utf8")).toBe(original)
     expect(await readFile(join(home, "shared", "workspace", "AGENTS.md"), "utf8")).toBe(prompt)
     expect(await readdir(home)).toEqual(["shared"])
+  })
+
+  test("persists advertised networking across restarts and manages the bound interface locally", async () => {
+    const home = await makeHome()
+    expect((await command(home, ["new", "networked"], {
+      BIRDS_HOST: "Bird.EXAMPLE",
+      BIRDS_BIND: "127.0.0.1",
+    })).code).toBe(0)
+    const saved = await metadata(home, "networked")
+    expect(saved.host).toBe("bird.example")
+    expect(saved.bind).toBe("127.0.0.1")
+    const address = `http://bird.example:${saved.port}/ask`
+    const promptPath = join(home, "networked", "workspace", "AGENTS.md")
+    const prompt = await readFile(promptPath, "utf8")
+    expect(prompt).toContain(`your address is ${address}.`)
+    const changedEnvironment = { BIRDS_HOST: "wrong.example", BIRDS_BIND: "192.0.2.1" }
+
+    try {
+      const started = await command(home, ["start", "networked", "--detach"], changedEnvironment)
+      expect({ code: started.code, stderr: started.stderr }).toEqual({ code: 0, stderr: "" })
+      expect(started.stdout).toContain(address)
+      expect((await command(home, ["list"], changedEnvironment)).stdout).toContain(`networked\trunning\t${address}`)
+      expect((await fetch(`http://127.0.0.1:${saved.port}/control`)).status).toBe(401)
+      expect((await post(saved.port, "First networked message.")).status).toBe(202)
+      await waitUntil(async () => (await events(home, "networked")).some((event) => event.kind === "completed"))
+      const threadPath = join(home, "networked", "thread-id")
+      const thread = await readFile(threadPath, "utf8")
+      expect((await command(home, ["stop", "networked"], changedEnvironment)).code).toBe(0)
+      expect((await command(home, ["start", "networked", "--detach"])).stdout).toContain(address)
+      expect((await post(saved.port, "Second networked message.")).status).toBe(202)
+      await waitUntil(async () => (await events(home, "networked")).filter((event) => event.kind === "completed").length === 2)
+      expect(await readFile(threadPath, "utf8")).toBe(thread)
+      expect(await readFile(promptPath, "utf8")).toBe(prompt)
+      expect(await metadata(home, "networked")).toEqual(saved)
+    } finally {
+      await stopIfRunning(home, "networked")
+    }
+  })
+
+  test("keeps legacy birds on localhost without rewriting their metadata or prompt", async () => {
+    const home = await makeHome()
+    expect((await command(home, ["new", "legacy"])).code).toBe(0)
+    const { id, port } = await metadata(home, "legacy")
+    const path = join(home, "legacy", "bird.json")
+    const legacy = JSON.stringify({ id, port })
+    await writeFile(path, legacy)
+    const promptPath = join(home, "legacy", "workspace", "AGENTS.md")
+    const prompt = await readFile(promptPath, "utf8")
+    try {
+      const started = await command(home, ["start", "legacy", "--detach"], {
+        BIRDS_HOST: "not-this-machine.example",
+        BIRDS_BIND: "192.0.2.1",
+      })
+      expect(started.code).toBe(0)
+      expect(started.stdout).toContain(`http://127.0.0.1:${port}/ask`)
+      expect((await post(port, "Keep my old state.")).status).toBe(202)
+      await waitUntil(async () => (await events(home, "legacy")).some((event) => event.kind === "completed"))
+      expect(await readFile(path, "utf8")).toBe(legacy)
+      expect(await readFile(promptPath, "utf8")).toBe(prompt)
+    } finally {
+      await stopIfRunning(home, "legacy")
+    }
   })
 
   test("limits retained bird directories to 32 by default", async () => {
@@ -212,7 +280,7 @@ describe("birds", () => {
       let output = ""
       const decoder = new TextDecoder()
       const client = Bun.spawn([...cliCommand, "chat", "memory"], {
-        env: { ...Bun.env, BIRDS_HOME: home, HUMMINGBIRDS_CODEX: fakeCodex },
+        env: { ...Bun.env, BIRDS_HOME: home, BIRDS_HOST: undefined, BIRDS_BIND: undefined, HUMMINGBIRDS_CODEX: fakeCodex },
         terminal: {
           cols: 120,
           rows: 24,
@@ -313,7 +381,7 @@ describe("birds", () => {
     }
   }, 20_000)
 
-  test("new peers have fresh memory and keep running after their initial peer stops", async () => {
+  test("new birds have no inherited peers or memory and keep running after their creator stops", async () => {
     const home = await makeHome()
     expect(
       (await command(home, ["new", "parent"], { HUMMINGBIRDS_SEED: "PARENT-ONLY-FACT-71" })).code,
@@ -340,21 +408,22 @@ describe("birds", () => {
       await waitUntil(async () => (await events(home, "parent")).some((event) => event.kind === "completed"))
       const parentThread = await readFile(join(home, "parent", "thread-id"), "utf8")
 
-      expect((await command(home, ["new", "sprout", "--peer", "parent"])).code).toBe(0)
+      expect((await command(home, ["new", "sprout"])).code).toBe(0)
       const child = await metadata(home, "sprout")
       const prompt = await readFile(join(home, "sprout", "workspace", "AGENTS.md"), "utf8")
       expect(prompt).toContain(`Your ID is sprout, and your address is http://127.0.0.1:${child.port}/ask.`)
-      expect(prompt).toContain(`- parent at http://127.0.0.1:${parent.port}/ask`)
+      expect(prompt).toContain("Your initial peers are:\n(none)")
+      expect(prompt).not.toContain("--peer")
+      expect(prompt).toContain("After splitting, tell each child about the peers you think are relevant to its work, including their IDs, addresses, and what you know about them.")
       expect(prompt).not.toContain("PARENT-ONLY-FACT-71")
       expect(await Bun.file(join(home, "sprout", "thread-id")).exists()).toBe(false)
       expect(await readdir(join(home, "sprout", "workspace"))).toEqual(["AGENTS.md"])
       expect((await command(home, ["start", "sprout", "--detach"])).code).toBe(0)
 
-      expect((await command(home, ["new", "twig", "--peer", "sprout"])).code).toBe(0)
+      expect((await command(home, ["new", "twig"])).code).toBe(0)
       const grandchild = await metadata(home, "twig")
       const grandchildPrompt = await readFile(join(home, "twig", "workspace", "AGENTS.md"), "utf8")
-      expect(grandchildPrompt).toContain(`- sprout at http://127.0.0.1:${child.port}/ask`)
-      expect(grandchildPrompt).not.toContain(`- parent at http://127.0.0.1:${parent.port}/ask`)
+      expect(grandchildPrompt).toContain("Your initial peers are:\n(none)")
       expect(grandchildPrompt).not.toContain("PARENT-ONLY-FACT-71")
       expect(await Bun.file(join(home, "twig", "thread-id")).exists()).toBe(false)
       expect((await command(home, ["start", "twig", "--detach"])).code).toBe(0)
@@ -420,6 +489,8 @@ function spawn(home: string, args: string[], environment: Record<string, string>
     env: {
       ...Bun.env,
       BIRDS_HOME: home,
+      BIRDS_HOST: undefined,
+      BIRDS_BIND: undefined,
       HUMMINGBIRDS_CODEX: fakeCodex,
       HUMMINGBIRDS_MAX_BIRDS: undefined,
       HUMMINGBIRDS_PEERS: undefined,
@@ -445,8 +516,8 @@ async function command(
   return { code, stdout, stderr }
 }
 
-async function metadata(home: string, id: string): Promise<{ id: string; port: number }> {
-  return JSON.parse(await readFile(join(home, id, "bird.json"), "utf8")) as { id: string; port: number }
+async function metadata(home: string, id: string): Promise<{ id: string; port: number; host: string; bind: string }> {
+  return JSON.parse(await readFile(join(home, id, "bird.json"), "utf8")) as { id: string; port: number; host: string; bind: string }
 }
 
 async function events(home: string, id: string): Promise<Event[]> {

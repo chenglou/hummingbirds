@@ -11,11 +11,11 @@
     "birds": "bun run src/cli.ts",
     "start": "bun run src/cli.ts start",
     "chat": "bun run src/cli.ts chat",
-    "test": "bun test",
+    "test": "bun test ./tests",
     "typecheck": "tsc --noEmit",
     "lint": "oxlint --type-aware src tests experiments",
     "knip": "knip",
-    "check": "tsc --noEmit && oxlint --type-aware src tests experiments && bun test"
+    "check": "bun run typecheck && bun run lint && bun run test"
   },
   "dependencies": {
     "@openai/codex": "0.149.1"

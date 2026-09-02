@@ -320,7 +320,7 @@ describe("Hummingbirds", () => {
         headers: {
           "x-from": "b",
           "x-in-reply-to": peerQuestion.requestId,
-          "x-route": JSON.stringify(["interactive", "b"]),
+          "x-route": JSON.stringify([bird.url, peer.url]),
           "x-reply-to": peer.url,
         },
         body: "B knows Nacre-A.",
@@ -455,13 +455,13 @@ describe("Hummingbirds", () => {
       expect(trainingReply?.question).toBe(`Amber Tern-417.\n\nContributors: c at ${c.url}`)
       expect(received(await events(a), trainingRequest)).toEqual([
         ["human", null, null, []],
-        ["b", b.url, trainingRequest, ["a", "b"]],
+        ["b", b.url, trainingRequest, [a.url, b.url]],
       ])
       expect(received(await events(b), trainingRequest)).toEqual([
-        ["a", a.url, null, ["a"]],
-        ["c", c.url, trainingRequest, ["a", "b", "c"]],
+        ["a", a.url, null, [a.url]],
+        ["c", c.url, trainingRequest, [a.url, b.url, c.url]],
       ])
-      expect(received(await events(c), trainingRequest)).toEqual([["b", b.url, null, ["a", "b"]]])
+      expect(received(await events(c), trainingRequest)).toEqual([["b", b.url, null, [a.url, b.url]]])
 
       const firstThreadId = await readFile(join(a.directory, "bird", "thread-id"), "utf8")
       const port = Number(new URL(a.url).port)
@@ -483,15 +483,56 @@ describe("Hummingbirds", () => {
       expect(probeReply?.question).toBe(`Violet Shoal-862.\n\nContributors: c at ${c.url}`)
       expect(received(await events(a), probeRequest)).toEqual([
         ["human", null, null, []],
-        ["c", c.url, probeRequest, ["a", "c"]],
+        ["c", c.url, probeRequest, [a.url, c.url]],
       ])
       expect(received(await events(b), probeRequest)).toEqual([])
-      expect(received(await events(c), probeRequest)).toEqual([["a", a.url, null, ["a"]]])
+      expect(received(await events(c), probeRequest)).toEqual([["a", a.url, null, [a.url]]])
       expect(await readFile(join(a.directory, "bird", "thread-id"), "utf8")).toBe(firstThreadId)
     } finally {
       await Promise.all(birds.map(stopBird))
     }
   }, 15_000)
+
+  test("distinguishes same-named birds by address and still rejects revisiting an address", async () => {
+    const root = await makeTemporaryDirectory()
+    const source = await startBird(join(root, "machine-b", "a"), {
+      HUMMINGBIRDS_SEED: "Nacre-A's private phrase is “Different Machine-42.”",
+    })
+    const caller = await startBird(join(root, "machine-a", "a"), {
+      HUMMINGBIRDS_PEERS: `- a at ${source.url}`,
+    })
+    const inbox = startInbox()
+    const requestId = opaque("same-name-cross-address")
+
+    try {
+      expect(caller.id).toBe(source.id)
+      expect(caller.url).not.toBe(source.url)
+      expect((await send(caller, "What is Nacre-A's phrase?", requestId, inbox.url)).status).toBe(202)
+      await waitUntil(async () => inbox.messages.length === 1)
+      expect(inbox.messages[0]).toEqual({
+        body: `Different Machine-42.\n\nContributors: a at ${source.url}`,
+        from: "a",
+        inReplyTo: requestId,
+        request: null,
+      })
+      expect(received(await events(source), requestId)).toEqual([
+        ["a", caller.url, null, [caller.url]],
+      ])
+      expect(received(await events(caller), requestId)).toEqual([
+        ["human", inbox.url, null, []],
+        ["a", source.url, requestId, [caller.url, source.url]],
+      ])
+      const cycle = await fetch(caller.url, {
+        method: "POST",
+        headers: { "x-request": requestId, "x-route": JSON.stringify([caller.url, source.url]) },
+        body: "This really revisits the first address.",
+      })
+      expect(cycle.status).toBe(409)
+    } finally {
+      await Promise.all([stopBird(caller), stopBird(source)])
+      inbox.stop()
+    }
+  })
 
   test("handles one message at a time and rejects empty messages and cycles", async () => {
     const bird = await startBird(join(await makeTemporaryDirectory(), "solo"), {
@@ -511,7 +552,7 @@ describe("Hummingbirds", () => {
       const cycle = await fetch(bird.url, {
         method: "POST",
         headers: {
-          "x-route": JSON.stringify(["solo"]),
+          "x-route": JSON.stringify([bird.url]),
           "x-request": opaque("q-cycle"),
         },
         body: "cyclic question",
@@ -603,7 +644,7 @@ describe("Hummingbirds", () => {
         })
         expect([invalid.status, await invalid.text()]).toEqual([
           400,
-          "x-route must be a JSON array of node IDs",
+          "x-route must be a JSON array of bird addresses",
         ])
       }
       expect(await events(receiver)).toEqual([])
@@ -623,7 +664,7 @@ describe("Hummingbirds", () => {
       expect(inbox.messages[0]?.request).toBeNull()
       expect(inbox.messages[0]?.from).toBe(receiver.id)
       expect(received(await events(source), requestId)).toEqual([
-        [receiver.id, receiver.url, null, [receiver.id]],
+        [receiver.id, receiver.url, null, [receiver.url]],
       ])
       const reply = (await events(receiver)).find(
         (event) => event.kind === "received" && event.inReplyTo === requestId,
@@ -703,7 +744,7 @@ describe("Hummingbirds", () => {
       })
       const rules = join(configDirectory, "rules", "birds.rules")
       const commands = [
-        { argv: [...cliCommand, "new", "sprout", "--peer", "rules"], allowed: true },
+        { argv: [...cliCommand, "new", "sprout"], allowed: true },
         { argv: [...cliCommand, "start", "sprout", "--detach"], allowed: true },
         { argv: [...cliCommand, "stop", "rules"], allowed: false },
         { argv: [...cliCommand, "list"], allowed: false },
@@ -791,17 +832,26 @@ describe("Hummingbirds", () => {
     }
   }, 15_000)
 
-  test("pins model children to their own home and clears inherited initialization", async () => {
+  test("pins model children to their own home and network and clears inherited initialization", async () => {
     const root = await makeTemporaryDirectory()
     const capture = join(root, "capture-environment.ts")
     await writeFile(capture, `#!${process.execPath}\n` +
-      `const names = ["BIRDS_HOME", "HUMMINGBIRDS_SEED", "HUMMINGBIRDS_PEERS", "HUMMINGBIRDS_MAX_BIRDS"]\n` +
+      `const names = ["BIRDS_HOME", "BIRDS_HOST", "BIRDS_BIND", "HUMMINGBIRDS_SEED", "HUMMINGBIRDS_PEERS", "HUMMINGBIRDS_MAX_BIRDS"]\n` +
       `await Bun.stdin.text()\n` +
       `await Bun.write("captured-environment.json", JSON.stringify(Object.fromEntries(names.map(name => [name, Bun.env[name] ?? null]))))\n` +
       `console.log(JSON.stringify({ type: "thread.started", thread_id: crypto.randomUUID() }))\n`,
     { mode: 0o700 })
-    const bird = await startBird(join(root, "owned"), {
+    const directory = join(root, "owned")
+    await mkdir(directory)
+    await createBird(join(directory, "bird"), "owned", {
+      host: "owned.example",
+      bind: "0.0.0.0",
+      seed: "ONLY-THIS-BIRDS-SEED",
+    })
+    const bird = await startBird(directory, {
       BIRDS_HOME: "wrong-relative-home",
+      BIRDS_HOST: "wrong-inherited-host.example",
+      BIRDS_BIND: "192.0.2.1",
       HUMMINGBIRDS_CODEX: capture,
       HUMMINGBIRDS_SEED: "ONLY-THIS-BIRDS-SEED",
       HUMMINGBIRDS_PEERS: "- initial at http://127.0.0.1:1/ask",
@@ -809,10 +859,13 @@ describe("Hummingbirds", () => {
     })
 
     try {
-      expect((await send(bird, "Inspect the child environment.", opaque("child-environment"))).status).toBe(202)
+      const local = { ...bird, url: `http://127.0.0.1:${new URL(bird.url).port}/ask` }
+      expect((await send(local, "Inspect the child environment.", opaque("child-environment"))).status).toBe(202)
       await waitUntil(async () => (await events(bird)).some((event) => event.kind === "completed"))
       expect(JSON.parse(await readFile(join(bird.directory, "bird", "workspace", "captured-environment.json"), "utf8"))).toEqual({
         BIRDS_HOME: bird.directory,
+        BIRDS_HOST: "owned.example",
+        BIRDS_BIND: "0.0.0.0",
         HUMMINGBIRDS_SEED: null,
         HUMMINGBIRDS_PEERS: null,
         HUMMINGBIRDS_MAX_BIRDS: "3",
@@ -994,7 +1047,7 @@ function startChat(
     [process.execPath, "run", resolve("src/cli.ts"), "chat", destination],
     {
       cwd: directory,
-      env: { ...Bun.env, BIRDS_HOME: directory },
+      env: { ...Bun.env, BIRDS_HOME: directory, BIRDS_HOST: undefined, BIRDS_BIND: undefined },
       terminal: {
         cols: 120,
         rows: 24,

@@ -1,10 +1,11 @@
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "fs"
 import { devNull, homedir } from "os"
 import { dirname, join, resolve } from "path"
+import { httpOrigin, localOrigin, networkSettings, type Network } from "./network.ts"
 
-export type Bird = { id: string; directory: string; port: number }
+export type Bird = Network & { id: string; directory: string; port: number }
 
-type Options = { port?: number; peers?: string; seed?: string }
+type Options = Partial<Network> & { port?: number; peers?: string; seed?: string }
 type Run = { pid: number; token: string }
 
 // Trusted bootstraps must not load a bird's writable Bun config or environment files.
@@ -37,17 +38,20 @@ export function readBird(directory: string): Bird {
   const bird = JSON.parse(readFileSync(join(directory, "bird.json"), "utf8")) as {
     id: string
     port: number
+    host?: string
+    bind?: string
   }
   birdDirectory(bird.id, dirname(directory))
   if (!Number.isSafeInteger(bird.port) || bird.port < 1 || bird.port > 65_535) {
     throw new Error("Bird port must be between 1 and 65535.")
   }
-  return { ...bird, directory }
+  return { ...bird, ...networkSettings(bird.host, bird.bind), directory }
 }
 
 export async function createBird(directory: string, id: string, options: Options = {}): Promise<Bird> {
   const root = dirname(directory)
   birdDirectory(id, root)
+  const network = networkSettings(options.host, options.bind)
   if (options.port !== undefined && (!Number.isSafeInteger(options.port) || options.port < 0 || options.port > 65_535)) {
     throw new Error("Bird port must be between 0 and 65535.")
   }
@@ -67,13 +71,13 @@ export async function createBird(directory: string, id: string, options: Options
   const requested = options.port ?? 0
   let reservation: ReturnType<typeof Bun.serve>
   try {
-    reservation = Bun.serve({ hostname: "127.0.0.1", port: requested, fetch: () => new Response() })
+    reservation = Bun.serve({ hostname: network.bind, port: requested, fetch: () => new Response() })
     while (reservation.port !== undefined && readdirSync(root, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && existsSync(join(root, entry.name, "bird.json")))
       .some((entry) => readBird(join(root, entry.name)).port === reservation.port)) {
       await reservation.stop(true)
       if (requested !== 0) throw new Error(`Bird port ${requested} is already assigned.`)
-      reservation = Bun.serve({ hostname: "127.0.0.1", port: requested, fetch: () => new Response() })
+      reservation = Bun.serve({ hostname: network.bind, port: requested, fetch: () => new Response() })
     }
   } catch (error) {
     rmdirSync(directory)
@@ -94,15 +98,15 @@ export async function createBird(directory: string, id: string, options: Options
       join(workspace, "AGENTS.md"),
       prompt
         .replaceAll("[id]", id)
-        .replaceAll("[address]", `http://127.0.0.1:${port}/ask`)
+        .replaceAll("[address]", `${httpOrigin(network.host, port)}/ask`)
         .replaceAll("[command]", command)
         .replaceAll("[peers]", options.peers ?? "(none)")
         .replaceAll("[seed]", options.seed ?? "(none)"),
     )
     const metadata = join(directory, "bird.json")
-    writeFileSync(`${metadata}.tmp`, JSON.stringify({ id, port }))
+    writeFileSync(`${metadata}.tmp`, JSON.stringify({ id, port, ...network }))
     renameSync(`${metadata}.tmp`, metadata)
-    return { id, directory, port }
+    return { id, directory, port, ...network }
   } finally {
     await reservation.stop(true)
   }
@@ -140,7 +144,7 @@ export async function startBird(bird: Bird, detached: boolean): Promise<Bun.Subp
 export async function birdStatus(bird: Bird): Promise<"stopped" | "unreachable" | "running" | "stopping"> {
   const run = readRun(bird.directory)
   if (run === null) return "stopped"
-  const response = await fetch(`http://127.0.0.1:${bird.port}/control`, {
+  const response = await fetch(`${localOrigin(bird)}/control`, {
     headers: { authorization: `Bearer ${run.token}` },
     signal: AbortSignal.timeout(500),
   }).catch(() => null)
@@ -152,7 +156,7 @@ export async function birdStatus(bird: Bird): Promise<"stopped" | "unreachable" 
 export async function stopBird(bird: Bird): Promise<void> {
   const run = readRun(bird.directory)
   if (run === null) return
-  const response = await fetch(`http://127.0.0.1:${bird.port}/control`, {
+  const response = await fetch(`${localOrigin(bird)}/control`, {
     method: "POST",
     headers: { authorization: `Bearer ${run.token}` },
     body: "stop",

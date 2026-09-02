@@ -1,53 +1,78 @@
 import { createInterface } from "readline"
+import { httpOrigin, isLoopbackHost, networkSettings, type Network } from "./network.ts"
 
 type Peer = { address: string; id: string }
 type Turn = { callerId: string; replyTo: string | null }
 
-export async function chat(target: string): Promise<void> {
+export async function chat(target: string, options: Partial<Network> & { port?: number } = {}): Promise<void> {
   const origin = destination(target)
+  const network = networkSettings(options.host, options.bind)
+  const port = options.port ?? 0
+  if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
+    throw new Error("Chat callback port must be an integer from 0 to 65535.")
+  }
+  if (!isLoopbackHost(origin.hostname) && isLoopbackHost(network.host)) {
+    throw new Error("Remote birds cannot reach a loopback chat callback. Set BIRDS_HOST to this machine's reachable address.")
+  }
   const address = new URL("/ask", origin).href
   const events = new URL("/events", origin).href
   const abort = new AbortController()
   const response = await fetch(events, { signal: abort.signal })
-  if (!response.ok) throw new Error(`${events} returned ${response.status}`)
-  if (response.body === null) throw new Error(`${events} did not provide an event stream`)
+  if (!response.ok || response.body === null) {
+    abort.abort()
+    throw new Error(!response.ok
+      ? `${events} returned ${response.status}`
+      : `${events} did not provide an event stream`)
+  }
 
   const interactive = process.stdout.isTTY === true && process.stdin.isTTY === true
   const peers: Peer[] = []
   let nodeId = "bird"
   let active: Turn | null = null
 
-  const inbox = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    async fetch(request) {
-      if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
-        return new Response("POST a plain-text message to /ask", { status: 404 })
-      }
-      const incomingRequest = request.headers.get("x-request")
-      const inReplyTo = request.headers.get("x-in-reply-to")
-      if (incomingRequest !== null && inReplyTo !== null) {
-        return new Response("Send either x-request or x-in-reply-to, not both.", { status: 400 })
-      }
-      const requestId = incomingRequest ?? inReplyTo ?? crypto.randomUUID()
-      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
-        return new Response("Request IDs must be canonical UUIDs.", { status: 400 })
-      }
-      const question = await request.text()
-      if (question.trim() === "") return new Response("Empty message.", { status: 400 })
+  let inbox: ReturnType<typeof Bun.serve>
+  try {
+    inbox = Bun.serve({
+      hostname: network.bind,
+      port,
+      async fetch(request) {
+        if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
+          return new Response("POST a plain-text message to /ask", { status: 404 })
+        }
+        const incomingRequest = request.headers.get("x-request")
+        const inReplyTo = request.headers.get("x-in-reply-to")
+        if (incomingRequest !== null && inReplyTo !== null) {
+          return new Response("Send either x-request or x-in-reply-to, not both.", { status: 400 })
+        }
+        const requestId = incomingRequest ?? inReplyTo ?? crypto.randomUUID()
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+          return new Response("Request IDs must be canonical UUIDs.", { status: 400 })
+        }
+        const question = await request.text()
+        if (question.trim() === "") return new Response("Empty message.", { status: 400 })
 
-      const callerId = request.headers.get("x-from") ?? "unknown"
-      render(formatMessage(callerId, question, callerId))
-      return new Response("Accepted by human.", {
-        status: 202,
-        headers: {
-          "content-type": "text/plain; charset=utf-8",
-          "x-request": requestId,
-        },
-      })
-    },
-  })
-  const inboxAddress = `http://127.0.0.1:${inbox.port}/ask`
+        const callerId = request.headers.get("x-from") ?? "unknown"
+        render(formatMessage(callerId, question, callerId))
+        return new Response("Accepted by human.", {
+          status: 202,
+          headers: {
+            "content-type": "text/plain; charset=utf-8",
+            "x-request": requestId,
+          },
+        })
+      },
+    })
+  } catch (error) {
+    abort.abort()
+    throw error
+  }
+  const inboxPort = inbox.port
+  if (inboxPort === undefined) {
+    abort.abort()
+    await inbox.stop(true)
+    throw new Error("Could not determine the chat callback port.")
+  }
+  const inboxAddress = new URL("/ask", httpOrigin(network.host, inboxPort)).href
   const background = 101 + Number(Bun.hash.wyhash("human") % 6n)
   const input = createInterface({
     input: process.stdin,
@@ -87,6 +112,7 @@ export async function chat(target: string): Promise<void> {
       if (interactive) render("")
     }
   } finally {
+    input.close()
     abort.abort()
     await streaming
     await inbox.stop(true)
@@ -174,9 +200,9 @@ export async function chat(target: string): Promise<void> {
 
   function remember(id: string, peerAddress: string): void {
     if (id === "human") return
-    const known = peers.find((peer) => peer.id === id)
+    const known = peers.find((peer) => peer.address === peerAddress)
     if (known === undefined) peers.push({ id, address: peerAddress })
-    else known.address = peerAddress
+    else known.id = id
   }
 
   function outgoingMessage(command: string): { address: string; recipient: string; message: string } | null {

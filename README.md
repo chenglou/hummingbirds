@@ -12,64 +12,54 @@ birds new a
 birds start a
 ```
 
-`bun link` makes this checkout's `birds` command available globally. Codex is a pinned dependency; no separate Codex or Node installation is needed. On a remote server, run `bun run --bun codex login --device-auth` from this checkout and finish signing in from your own browser.
+Requires Bun. `bun link` exposes `birds` globally; Codex is bundled, so no separate Codex or Node installation is needed. For remote login, add `--device-auth` to the login command and finish in your browser.
 
 On Linux, install `bubblewrap`; Ubuntu 24.04 may also require the [documented AppArmor setup](https://learn.chatgpt.com/docs/sandboxing#prerequisites).
 
-This uses the Codex you're used to, plus a thin prompt to make it understand it's one bird of a flock.
+`start` stays in the foreground and prints raw events. Run `birds chat a` in another terminal for just messages. Chat also accepts a port or HTTP origin, without `/ask`.
 
-`birds start` stays in the foreground and prints the raw event stream. In another terminal:
+## Across machines
 
-```sh
-birds chat a
-```
-
-Chat shows messages without raw logs. Local names, ports, and HTTP origins work:
+Localhost is the default. For networking, replace this example with the server's reachable IP or hostname:
 
 ```sh
-birds chat a
-birds chat 3001
-birds chat http://localhost:3001
+BIRDS_HOST=10.0.0.11 birds new shared --port 3001
+birds start shared
 ```
 
-The birds use the same HTTP message protocol among themselves. In that sense, they see you as just another bird too. Messages are accepted immediately; actual replies arrive later as new messages.
+Introduce birds through ordinary messages with their IDs and full addresses from `birds list`. Names and listings are local to each machine.
 
-The server and chat inbox currently bind to localhost. To use a bird on a remote server, SSH there and run `birds chat <id>` on that machine. Cross-machine flocks aren't supported yet.
+`new` saves the host and listening interface; restarting doesn't change them. Children inherit them and get their own ports. Use `BIRDS_BIND` if the listening interface differs from the advertised host.
+
+Remote chat needs the chat machine's own reachable address for replies:
+
+```sh
+BIRDS_HOST=10.0.0.22 birds chat 10.0.0.11:3001 --port 3002
+```
+
+`--port` fixes the reply inbox port; otherwise a free one is chosen. Named chat uses the bird's saved network settings unless overridden. Both machines must reach each other's bird and inbox ports, including children's ports. There's no NAT traversal; alternatively, SSH to the server and chat there.
+
+Use a private network or restrict access with a firewall. There is no authentication or encryption: anyone who can reach these ports can send work and read conversations. Don't expose them openly to the Internet.
 
 ## Manage local birds
 
 ```sh
-birds new b --peer a
+birds new b
 birds start b --detach
 birds list
 birds stop b
-birds start b
 ```
 
-`new` creates a fresh bird without starting it. Repeat `--peer <local-id>` to give it starting peers; `--port 3001` chooses a specific port. Otherwise a free port is chosen and saved for future starts. Every creation counts against a local limit of 32 bird directories, including stopped birds; set `HUMMINGBIRDS_MAX_BIRDS` to change it.
+`new` creates a stopped bird. Its port is chosen once, or set with `--port`. `--detach` runs it in the background. `stop` drains accepted work; `start` resumes its memory. The default limit is 32 bird directories, including stopped birds; override with `HUMMINGBIRDS_MAX_BIRDS`.
 
-`stop` rejects new work and finishes already-accepted messages before exiting. Saved memory remains for the next `start`.
+Birds can create children with these same commands and teach them through messages.
 
-Each bird lives in `~/.birds/<id>/`; set `BIRDS_HOME` to use another local flock. The directory holds its identity and port (`bird.json`), prompt (`workspace/AGENTS.md`), conversation ID (`thread-id`), and event log (`events.jsonl`). Detached output is appended to `stdout.jsonl`.
+## State and development
 
-Startup generates permissions in protected `workspace/.codex/`. Ordinary tools keep `workspace-write` and `approval_policy=never`; the generated rules exempt only the installed CLI's `new` and `start` commands. Keep that installation outside bird-writable workspaces and temporary directories. Codex also loads existing user rules despite `--ignore-user-config`; no global rules or configuration are changed.
+Bird state lives in `~/.birds/<id>/` (`BIRDS_HOME` to override). Prompts aren't regenerated on restart; update `workspace/AGENTS.md` after changing the template or moving the installation. Older birds without network settings stay on localhost.
 
-Codex stores the conversation itself locally under `~/.codex/` (or `CODEX_HOME`). The thread ID alone cannot recover it if that data is lost. To preserve memory, securely back up both the bird directories and Codex home; the latter also contains login credentials.
+Back up both the bird directories and `~/.codex/` (`CODEX_HOME` to override). The thread ID alone cannot restore a conversation. Codex home also contains login credentials.
 
-You can also POST plain text to an address from `birds list`:
+Keep the installation outside bird-writable workspaces and temporary directories: its `new` and `start` commands bypass the workspace sandbox. Existing Codex rules also apply.
 
-```sh
-curl localhost:3001/ask -d "Ask your peers what Ben likes."
-```
-
-Bare curl receives an acknowledgement, not the bird's eventual answer; use `birds chat` for a reply inbox.
-
-There is no manager daemon or global bird directory. `list` only inspects the birds stored locally; the models decide what to ask, remember, and pass along.
-
-Birds create peers with the same `new <id> --peer <self>` and `start <id> --detach` commands. Their generated prompt supplies the installed CLI's full path. The child has a fresh conversation, knows its parent as a peer, and runs independently; teach or introduce it through ordinary messages. Existing prompts aren't rewritten on restart; update their creation instructions after changing the template or moving the installation.
-
-For initial knowledge and other peer addresses, `new` also accepts `HUMMINGBIRDS_SEED` and `HUMMINGBIRDS_PEERS` from the environment. `HUMMINGBIRDS_CODEX` overrides the packaged CLI; `HUMMINGBIRDS_CODEX_ARGS` supplies extra Codex flags at startup.
-
-## Development
-
-Without a global link, use `bun run birds <command>` in this checkout. `bun start a` and `bun chat a` are shortcuts. Existing copied instances aren't imported or modified automatically.
+Without a global link, use `bun run birds <command>`. Run `bun run check` for type checking, lint, and tests.

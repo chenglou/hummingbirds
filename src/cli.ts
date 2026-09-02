@@ -12,15 +12,19 @@ import {
   startBird,
   stopBird,
 } from "./local.ts"
+import { httpOrigin, localOrigin, networkSettings } from "./network.ts"
 
 const usage = `Usage:
-  birds new <id> [--port N] [--peer <local-id> ...]
+  birds new <id> [--port N]
   birds start <id> [--detach]
-  birds chat <id | port | host:port | URL>
+  birds chat <id | port | host:port | URL> [--port N]
   birds stop <id>
   birds list
 
 Birds live in ~/.birds (override with BIRDS_HOME).
+Set BIRDS_HOST to this machine's reachable IP or hostname for networking.
+BIRDS_BIND overrides the listening interface; both are saved by new.
+Chat uses these settings for its reply inbox; --port fixes its port.
 Start stays in the foreground unless --detach is given.
 Stop drains accepted work and preserves memory.`
 
@@ -35,21 +39,13 @@ try {
         const { positionals, values } = parseArgs({
           args,
           allowPositionals: true,
-          options: { port: { type: "string" }, peer: { type: "string", multiple: true } },
+          options: { port: { type: "string" } },
         })
         const id = oneArgument(positionals)
-        const peers = values.peer === undefined
-          ? (Bun.env["HUMMINGBIRDS_PEERS"] ?? "(none)")
-          : values.peer.map((name) => {
-            const peer = readBird(birdDirectory(name))
-            return `- ${peer.id} at http://127.0.0.1:${peer.port}/ask`
-          }).join("\n")
-        if (values.port !== undefined && !/^\d+$/.test(values.port)) {
-          throw new Error("Port must be an integer from 0 to 65535.")
-        }
         await createBird(birdDirectory(id), id, {
-          port: Number(values.port ?? 0),
-          peers,
+          port: portOption(values.port),
+          ...networkSettings(Bun.env["BIRDS_HOST"], Bun.env["BIRDS_BIND"]),
+          peers: Bun.env["HUMMINGBIRDS_PEERS"] ?? "(none)",
           seed: Bun.env["HUMMINGBIRDS_SEED"] ?? "(none)",
         })
         console.log(`Created ${id}. Start it with birds start ${id}.`)
@@ -78,7 +74,7 @@ try {
           state.child = child
           if (state.interrupted) child.kill("SIGTERM")
           if (values.detach === true && !state.interrupted) {
-            console.log(`Started ${bird.id} at http://127.0.0.1:${bird.port}/ask.`)
+            console.log(`Started ${bird.id} at ${httpOrigin(bird.host, bird.port)}/ask.`)
           } else {
             process.exitCode = await child.exited
           }
@@ -90,15 +86,26 @@ try {
         break
       }
       case "chat": {
-        const target = oneArgument(args)
+        const { positionals, values } = parseArgs({
+          args,
+          allowPositionals: true,
+          options: { port: { type: "string" } },
+        })
+        const target = oneArgument(positionals)
+        const port = portOption(values.port)
+        const host = Bun.env["BIRDS_HOST"]
+        const bind = Bun.env["BIRDS_BIND"]
         if (/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(target)
           && existsSync(join(birdDirectory(target), "bird.json"))) {
           const bird = readBird(birdDirectory(target))
           const status = await birdStatus(bird)
           if (status !== "running") throw new Error(`${bird.id} is ${status}. Start it with birds start ${bird.id}.`)
-          await chat(`http://127.0.0.1:${bird.port}`)
+          await chat(localOrigin(bird), {
+            port,
+            ...networkSettings(host ?? bird.host, bind ?? (host === undefined ? bird.bind : undefined)),
+          })
         } else if (/^\d+$/.test(target) || target.includes(":") || target.includes(".")) {
-          await chat(target)
+          await chat(target, { port, ...networkSettings(host, bind) })
         } else {
           throw new Error(`Unknown local bird: ${target}. Use birds list.`)
         }
@@ -119,7 +126,7 @@ try {
           .map((entry) => readBird(join(root, entry.name)))
           .sort((a, b) => a.id.localeCompare(b.id))
         const rows = await Promise.all(birds.map(async (bird) => {
-          return `${bird.id}\t${await birdStatus(bird)}\thttp://127.0.0.1:${bird.port}/ask`
+          return `${bird.id}\t${await birdStatus(bird)}\t${httpOrigin(bird.host, bird.port)}/ask`
         }))
         console.log(["ID\tSTATUS\tADDRESS", ...rows].join("\n"))
         break
@@ -137,4 +144,12 @@ function oneArgument(args: string[]): string {
   const value = args[0]
   if (args.length !== 1 || value === undefined || value.startsWith("-")) throw new Error(usage)
   return value
+}
+
+function portOption(value: string | undefined): number {
+  const port = Number(value ?? 0)
+  if ((value !== undefined && !/^\d+$/.test(value)) || !Number.isSafeInteger(port) || port > 65_535) {
+    throw new Error("Port must be an integer from 0 to 65535.")
+  }
+  return port
 }

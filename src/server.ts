@@ -1,6 +1,6 @@
 // One bird: an HTTP server that hands each message to a persistent Codex
 // conversation. Each independently managed bird directory holds:
-//   bird.json     its durable identity and listening port
+//   bird.json     its durable identity and network addresses
 //   run.json      the current process's private lifecycle-control token
 //   thread-id     the Codex conversation to resume (created on the first message)
 //   events.jsonl  a log of every message, for inspection only
@@ -12,6 +12,7 @@ import { appendFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from
 import { rename } from "fs/promises"
 import { dirname, join, resolve } from "path"
 import { cliCommand, codexCommand, readBird } from "./local"
+import { httpOrigin } from "./network.ts"
 
 const headers = {
   callerId: "x-from",
@@ -58,7 +59,7 @@ const token = crypto.randomUUID()
 const runPath = join(directory, "run.json")
 
 const server = Bun.serve({
-  hostname: "127.0.0.1",
+  hostname: bird.bind,
   idleTimeout: 0,
   port: bird.port,
   fetch: (request) => {
@@ -74,7 +75,7 @@ const server = Bun.serve({
     }
   },
 })
-const address = `http://127.0.0.1:${server.port}/ask`
+const address = `${httpOrigin(bird.host, bird.port)}/ask`
 // Codex makes an existing workspace/.codex read-only, including in temporary flocks.
 const codexDirectory = join(workspace, ".codex")
 mkdirSync(join(codexDirectory, "rules"), { recursive: true, mode: 0o700 })
@@ -174,7 +175,7 @@ async function handleRequest(request: Request): Promise<Response> {
   const invocationId = crypto.randomUUID()
   const path = parsePath(request.headers.get(headers.route))
   if (path === null) {
-    return reply(400, `${headers.route} must be a JSON array of node IDs`, { requestId })
+    return reply(400, `${headers.route} must be a JSON array of bird addresses`, { requestId })
   }
   const context: Context = {
     callerId: request.headers.get(headers.callerId) ?? "human",
@@ -192,7 +193,7 @@ async function handleRequest(request: Request): Promise<Response> {
   // A message with no x-reply-to is fine: it may just share a fact or request an action.
   // A question that already went through this bird is a cycle; nothing else would
   // stop it going round forever. A reply is not a question, so its path is fine.
-  if (context.messageKind === "request" && context.path.includes(nodeId)) {
+  if (context.messageKind === "request" && context.path.includes(address)) {
     return reject(409, `Cycle rejected at ${nodeId}.`, context)
   }
 
@@ -255,6 +256,8 @@ async function ask(question: string, context: Context): Promise<string> {
     env: {
       ...process.env,
       BIRDS_HOME: dirname(directory),
+      BIRDS_HOST: bird.host,
+      BIRDS_BIND: bird.bind,
       HUMMINGBIRDS_PEERS: undefined,
       HUMMINGBIRDS_SEED: undefined,
       HUMMINGBIRDS_ROUTE: JSON.stringify(outgoingPath(context)),
@@ -330,8 +333,8 @@ async function readCodexOutput(stream: ReadableStream<Uint8Array>): Promise<stri
 // took from here, so pick up where this bird left off instead of appending the return
 // leg: a follow-up to a contributor is not a cycle.
 function outgoingPath(context: Context): string[] {
-  const self = context.messageKind === "request" ? -1 : context.path.indexOf(nodeId)
-  return [...(self < 0 ? context.path : context.path.slice(0, self)), nodeId]
+  const self = context.messageKind === "request" ? -1 : context.path.indexOf(address)
+  return [...(self < 0 ? context.path : context.path.slice(0, self)), address]
 }
 
 // What Codex reads: who sent the message, which request it belongs to, where the
@@ -375,8 +378,8 @@ function parsePath(raw: string | null): string[] | null {
   try {
     const value: unknown = JSON.parse(raw)
     if (!Array.isArray(value)) return null
-    const ids: unknown[] = value
-    return ids.every((id): id is string => typeof id === "string") ? ids : null
+    const addresses: unknown[] = value
+    return addresses.every((address): address is string => typeof address === "string") ? addresses : null
   } catch {
     return null
   }
