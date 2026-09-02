@@ -1,17 +1,18 @@
 // One bird: an HTTP server that hands each message to a persistent Codex
 // conversation. Each independently managed bird directory holds:
 //   bird.json     its identity, network addresses, and Codex conversation ID
-//   run.json      the current process's private lifecycle-control token
+//   run/          the current process's private ownership/control record
 //   events.jsonl  a log of every message, for inspection only
 //   workspace/    Codex's working directory, where AGENTS.md tells the bird who it is
 //     .codex/     generated permissions and narrow CLI rules, protected by Codex
 // Nobody waits on the line: a message is acknowledged at once, the turn runs in its
 // own time, and the bird POSTs whatever it has to say to the message's x-reply-to address.
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs"
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "fs"
 import { dirname, join, resolve } from "path"
+import { parseArgs } from "util"
 import { createInboxes } from "./inbox.ts"
-import { cliCommand, codexCommand, readBird, writeBird } from "./local"
-import { httpOrigin } from "./network.ts"
+import { claimRun, cliCommand, codexCommand, readBird, updatePrompt, writeBird } from "./local"
+import { hostPort, httpOrigin, networkSettings } from "./network.ts"
 
 const headers = {
   callerId: "x-from",
@@ -36,8 +37,18 @@ type Event =
   | { kind: "started"; codexPid: number; threadId: string | null }
   | { kind: "completed"; threadId: string }
 
+const { values } = parseArgs({
+  args: process.argv.slice(2),
+  options: { address: { type: "string" }, bind: { type: "string" } },
+})
 const directory = resolve(Bun.env["HUMMINGBIRDS_DIRECTORY"] ?? "bird")
+const token = crypto.randomUUID()
+const { ready, release } = claimRun(directory, token)
+process.on("exit", release)
 const bird = readBird(directory)
+const requested = values.address === undefined && bird.network !== null
+  ? networkSettings(hostPort(bird.network.host, bird.network.port), values.bind ?? bird.network.bind)
+  : networkSettings(values.address, values.bind)
 const nodeId = bird.id
 // Extra flags for the Codex turn, for example `-m model` or `-c key=value`, split on
 // whitespace (no shell quoting: a literal space always splits). They go after the
@@ -53,15 +64,13 @@ const subscribers: ReadableStreamDefaultController<Uint8Array>[] = []
 const encoder = new TextEncoder()
 let queue: Promise<unknown> = Promise.resolve()
 let stopping = false
-const token = crypto.randomUUID()
-const runPath = join(directory, "run.json")
 const inboxes = createInboxes()
 
-const server = Bun.serve({
-  hostname: bird.bind,
+const options = {
+  hostname: requested.bind,
   idleTimeout: 0,
-  port: bird.port,
-  fetch: (request) => {
+  port: requested.port,
+  fetch: (request: Request) => {
     const path = new URL(request.url).pathname
     if (path === "/inboxes" || path.startsWith("/inboxes/")) {
       if (stopping && path === "/inboxes") return new Response("Bird is stopping.", { status: 503 })
@@ -80,19 +89,30 @@ const server = Bun.serve({
         return new Response("Not found.", { status: 404 })
     }
   },
-})
-// Only migrate after owning the port: an older running server still reads this file.
+}
+let server = Bun.serve(options)
+// Keep a stopped bird's remembered address from being assigned to another bird.
+while (readdirSync(dirname(directory), { withFileTypes: true }).some((entry) => {
+  const peer = join(dirname(directory), entry.name)
+  return entry.isDirectory() && peer !== directory && existsSync(join(peer, "bird.json"))
+    && readBird(peer).network?.port === server.port
+})) {
+  void server.stop(true)
+  if (requested.port !== 0) throw new Error(`Bird port ${requested.port} is already assigned.`)
+  server = Bun.serve(options)
+}
+const network = { ...requested, port: server.port! }
+// Only migrate after owning the bird and binding successfully.
 const legacyThreadPath = join(directory, "thread-id")
+let threadId = bird.threadId
 if (existsSync(legacyThreadPath)) {
-  const threadId = readFileSync(legacyThreadPath, "utf8").trim()
+  threadId = readFileSync(legacyThreadPath, "utf8").trim()
   if (threadId === "") throw new Error(`${legacyThreadPath} is empty`)
   if (bird.threadId !== null && bird.threadId !== threadId) {
     throw new Error("bird.json and thread-id refer to different conversations.")
   }
-  writeBird({ ...readBird(directory), threadId })
-  unlinkSync(legacyThreadPath)
 }
-const address = `${httpOrigin(bird.host, bird.port)}/`
+const address = `${httpOrigin(network.host, network.port)}/`
 // Codex makes an existing workspace/.codex read-only, including in temporary flocks.
 const codexDirectory = join(workspace, ".codex")
 mkdirSync(join(codexDirectory, "rules"), { recursive: true, mode: 0o700 })
@@ -106,8 +126,10 @@ writeFileSync(
   `prefix_rule(pattern=${JSON.stringify([...cliCommand, ["new", "start"]])}, decision="allow")\n`,
   { mode: 0o600 },
 )
-writeFileSync(`${runPath}.tmp`, JSON.stringify({ pid: process.pid, token }), { mode: 0o600 })
-renameSync(`${runPath}.tmp`, runPath)
+updatePrompt(bird, network)
+writeBird({ ...bird, network, threadId })
+if (existsSync(legacyThreadPath)) unlinkSync(legacyThreadPath)
+ready()
 const startup = `${JSON.stringify({ id: nodeId, pid: process.pid, url: address })}\n`
 emit(startup)
 
@@ -144,8 +166,8 @@ function finishShutdown(): void {
   inboxes.close()
   for (const subscriber of subscribers) subscriber.close()
   subscribers.length = 0
-  unlinkSync(runPath)
   void server.stop(true)
+  release()
 }
 
 function streamEvents(): Response {
@@ -271,11 +293,11 @@ async function ask(question: string, context: Context): Promise<string> {
     env: {
       ...process.env,
       BIRDS_HOME: dirname(directory),
-      BIRDS_BIND: bird.bind,
       HUMMINGBIRDS_PEERS: undefined,
       HUMMINGBIRDS_SEED: undefined,
       HUMMINGBIRDS_ROUTE: JSON.stringify(outgoingPath(context)),
       // Don't inherit removed aliases from a parent process.
+      BIRDS_BIND: undefined,
       BIRDS_HOST: undefined,
       HUMMINGBIRDS_NODE_ADDRESS: undefined,
       HUMMINGBIRDS_NODE_ID: undefined,

@@ -13,19 +13,20 @@ import {
   startBird,
   stopBird,
 } from "./local.ts"
-import { httpOrigin, localOrigin, networkSettings } from "./network.ts"
+import { httpOrigin, localOrigin } from "./network.ts"
 
 const usage = `Usage:
   birds login [--device-auth]
-  birds new <id> [--host IP-or-hostname] [--port N]
-  birds start <id> [--detach]
+  birds new <id>
+  birds start <id> [--address host[:port]] [--bind IP-or-hostname] [--detach]
   birds chat <id | port | host:port | URL>
   birds stop <id>
   birds list
 
 Birds live in ~/.birds (override with BIRDS_HOME).
-Use new --host for this machine's reachable IP or hostname (default: 127.0.0.1).
-BIRDS_BIND overrides the listening interface; both are saved by new.
+First start defaults to localhost and a free port; restarts reuse the saved address.
+Use start --address for this machine's reachable host, optionally with :port; omitting the port picks a free one.
+Use --bind to override the local listening interface; otherwise it matches the advertised host.
 Chat receives replies through the bird's server; no local listening port is needed.
 Start stays in the foreground unless --detach is given.
 Stop drains accepted work and preserves memory.`
@@ -55,15 +56,9 @@ try {
         break
       }
       case "new": {
-        const { positionals, values } = parseArgs({
-          args,
-          allowPositionals: true,
-          options: { host: { type: "string" }, port: { type: "string" } },
-        })
+        const { positionals } = parseArgs({ args, allowPositionals: true, options: {} })
         const id = oneArgument(positionals)
         await createBird(birdDirectory(id), id, {
-          port: portOption(values.port),
-          ...networkSettings(values.host, Bun.env["BIRDS_BIND"]),
           peers: Bun.env["HUMMINGBIRDS_PEERS"] ?? "(none)",
           seed: Bun.env["HUMMINGBIRDS_SEED"] ?? "(none)",
         })
@@ -74,7 +69,7 @@ try {
         const { positionals, values } = parseArgs({
           args,
           allowPositionals: true,
-          options: { detach: { type: "boolean" } },
+          options: { address: { type: "string" }, bind: { type: "string" }, detach: { type: "boolean" } },
         })
         const bird = readBird(birdDirectory(oneArgument(positionals)))
         const state: { child: Bun.Subprocess | null; interrupted: boolean } = {
@@ -89,11 +84,12 @@ try {
         process.on("SIGTERM", interrupt)
         process.on("SIGHUP", interrupt)
         try {
-          const child = await startBird(bird, values.detach === true)
+          const child = await startBird(bird, values.detach === true, values)
           state.child = child
           if (state.interrupted) child.kill("SIGTERM")
           if (values.detach === true && !state.interrupted) {
-            console.log(`Started ${bird.id} at ${httpOrigin(bird.host, bird.port)}/.`)
+            const network = readBird(bird.directory).network!
+            console.log(`Started ${bird.id} at ${httpOrigin(network.host, network.port)}/.`)
           } else {
             process.exitCode = await child.exited
           }
@@ -111,7 +107,7 @@ try {
           const bird = readBird(birdDirectory(target))
           const status = await birdStatus(bird)
           if (status !== "running") throw new Error(`${bird.id} is ${status}. Start it with birds start ${bird.id}.`)
-          await chat(localOrigin(bird))
+          await chat(localOrigin(bird.network!))
         } else if (/^\d+$/.test(target) || target.includes(":") || target.includes(".")) {
           await chat(target)
         } else {
@@ -134,7 +130,8 @@ try {
           .map((entry) => readBird(join(root, entry.name)))
           .sort((a, b) => a.id.localeCompare(b.id))
         const rows = await Promise.all(birds.map(async (bird) => {
-          return `${bird.id}\t${await birdStatus(bird)}\t${httpOrigin(bird.host, bird.port)}/`
+          const address = bird.network === null ? "-" : `${httpOrigin(bird.network.host, bird.network.port)}/`
+          return `${bird.id}\t${await birdStatus(bird)}\t${address}`
         }))
         console.log(["ID\tSTATUS\tADDRESS", ...rows].join("\n"))
         break
@@ -152,12 +149,4 @@ function oneArgument(args: string[]): string {
   const value = args[0]
   if (args.length !== 1 || value === undefined || value.startsWith("-")) throw new Error(usage)
   return value
-}
-
-function portOption(value: string | undefined): number {
-  const port = Number(value ?? 0)
-  if ((value !== undefined && !/^\d+$/.test(value)) || !Number.isSafeInteger(port) || port > 65_535) {
-    throw new Error("Port must be an integer from 0 to 65535.")
-  }
-  return port
 }

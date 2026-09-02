@@ -99,11 +99,20 @@ describe("Hummingbirds", () => {
     let mirror: ReadableStreamDefaultReader<Uint8Array> | null = null
 
     try {
-      bird = await startBird(directory, { PATH: dirname(process.execPath) })
-      const originalBird = bird
+      await mkdir(directory)
+      await createBird(join(directory, "bird"), "bird")
+      const metadataPath = join(directory, "bird", "bird.json")
+      expect(JSON.parse(await readFile(metadataPath, "utf8"))).toEqual({ id: "bird", threadId: null, network: null })
       const agentsPath = join(directory, "bird", "workspace", "AGENTS.md")
+      const localNote = "\n## Local preference\nKeep these hand-entered details.\n"
+      await writeFile(agentsPath, await readFile(agentsPath, "utf8") + localNote)
+      bird = await startBird(directory, { PATH: dirname(process.execPath), BIRDS_BIND: "192.0.2.1" })
+      const originalBird = bird
       const agents = await readFile(agentsPath, "utf8")
       expect(agents).toContain(`Your ID is bird, and your address is ${bird.url}.`)
+      expect(agents).toContain("<!-- birds:runtime -->")
+      expect(agents).toContain("start <id> --address 127.0.0.1 --detach")
+      expect(agents).toEndWith(localNote)
       expect(agents).not.toContain("[peers]")
       expect(agents).not.toContain("parent-invocation-id")
       expect(agents).not.toContain("HUMMINGBIRDS_REQUEST_ID")
@@ -113,6 +122,11 @@ describe("Hummingbirds", () => {
       if (/^[A-Za-z0-9_./=-]+$/.test(process.execPath)) {
         expect(agents).toContain(`${process.execPath} --no-env-file`)
       }
+      expect(JSON.parse(await readFile(metadataPath, "utf8"))).toEqual({
+        id: "bird", threadId: null,
+        network: { host: "127.0.0.1", bind: "127.0.0.1", port: Number(new URL(bird.url).port) },
+      })
+      expect(await events(bird)).toEqual([])
 
       const eventResponse = await fetch(new URL("/events", bird.url))
       expect(eventResponse.headers.get("content-type")).toContain("application/x-ndjson")
@@ -168,7 +182,7 @@ describe("Hummingbirds", () => {
       const threadId = await savedThreadId(bird)
       expect(await Bun.file(join(directory, "bird", "thread-id")).exists()).toBe(false)
 
-      const port = Number(new URL(bird.url).port)
+      const originalAddress = bird.url
       await stopBird(bird)
       const output = await readRemainingOutput(bird.process.stdout)
       expect(output).toContain('"kind":"received"')
@@ -177,8 +191,9 @@ describe("Hummingbirds", () => {
       expect(output).not.toContain('"nodeId":')
       expect(output).not.toContain("\u001b[")
 
-      bird = await startBird(directory, {}, port)
+      bird = await startBird(directory)
       const restartedBird = bird
+      expect(bird.url).toBe(originalAddress)
       expect(await readFile(agentsPath, "utf8")).toBe(agents)
       expect((await send(bird, "And Ben likes camping.", opaque("q-second"))).status).toBe(202)
       await waitUntil(async () => {
@@ -192,16 +207,130 @@ describe("Hummingbirds", () => {
     }
   }, 15_000)
 
+  test("requires an explicit address to move a bird off its occupied saved port", async () => {
+    const directory = join(await makeTemporaryDirectory(), "moving")
+    let bird = await startBird(directory)
+    let occupied: ReturnType<typeof Bun.serve> | null = null
+    const metadataPath = join(directory, "bird", "bird.json")
+    const agentsPath = join(directory, "bird", "workspace", "AGENTS.md")
+    const localNote = "\n## Local preference\nRetain this while changing addresses.\n"
+
+    try {
+      await writeFile(agentsPath, await readFile(agentsPath, "utf8") + localNote)
+      expect((await send(bird, "Remember before moving.", opaque("before-moving"))).status).toBe(202)
+      await waitUntil(async () => (await events(bird)).some((event) => event.kind === "completed"))
+      const threadId = await savedThreadId(bird)
+      const originalAddress = bird.url
+      const originalMetadata = await readFile(metadataPath, "utf8")
+      const originalPrompt = await readFile(agentsPath, "utf8")
+      await stopBird(bird)
+      occupied = Bun.serve({
+        hostname: "127.0.0.1", port: Number(new URL(originalAddress).port),
+        fetch: () => new Response("occupied"),
+      })
+      const rejected = Bun.spawn([process.execPath, "run", serverPath], {
+        cwd: directory,
+        env: { ...Bun.env, HUMMINGBIRDS_DIRECTORY: join(directory, "bird") },
+        stdout: "ignore", stderr: "pipe",
+      })
+      expect(await rejected.exited).not.toBe(0)
+      expect(await new Response(rejected.stderr).text()).toContain("EADDRINUSE")
+      expect(await readFile(metadataPath, "utf8")).toBe(originalMetadata)
+      expect(await readFile(agentsPath, "utf8")).toBe(originalPrompt)
+      expect(await (await fetch(originalAddress)).text()).toBe("occupied")
+
+      bird = await startBird(directory, { BIRDS_BIND: "192.0.2.1" }, ["--address", "Bird.EXAMPLE", "--bind", "127.0.0.1"])
+      const nextPort = Number(new URL(bird.url).port)
+      expect(bird.url).toBe(`http://bird.example:${nextPort}/`)
+      expect(nextPort).not.toBe(Number(new URL(originalAddress).port))
+      expect(JSON.parse(await readFile(metadataPath, "utf8"))).toEqual({
+        id: "moving", threadId,
+        network: { host: "bird.example", bind: "127.0.0.1", port: nextPort },
+      })
+      const nextPrompt = await readFile(agentsPath, "utf8")
+      expect(nextPrompt).toContain(`Your ID is moving, and your address is ${bird.url}.`)
+      expect(nextPrompt).not.toContain(originalAddress)
+      expect(nextPrompt).toContain("start <id> --address bird.example --bind 127.0.0.1 --detach")
+      expect(nextPrompt).toEndWith(localNote)
+      expect((await events(bird)).filter((event) => event.kind === "started")).toHaveLength(1)
+      const local = { ...bird, url: `http://127.0.0.1:${nextPort}/` }
+      expect((await send(local, "Remember after moving.", opaque("after-moving"))).status).toBe(202)
+      await waitUntil(async () => (await events(bird)).filter((event) => event.kind === "completed").length === 2)
+      expect(await savedThreadId(bird)).toBe(threadId)
+
+      await stopBird(bird)
+      bird = await startBird(directory, { BIRDS_BIND: "192.0.2.1" }, ["--bind", "0.0.0.0"])
+      expect(bird.url).toBe(`http://bird.example:${nextPort}/`)
+      expect(JSON.parse(await readFile(metadataPath, "utf8"))).toEqual({
+        id: "moving", threadId,
+        network: { host: "bird.example", bind: "0.0.0.0", port: nextPort },
+      })
+      const reboundPrompt = await readFile(agentsPath, "utf8")
+      expect(reboundPrompt).toContain("start <id> --address bird.example --bind 0.0.0.0 --detach")
+      expect(reboundPrompt).toEndWith(localNote)
+      expect((await send({ ...bird, url: local.url }, "Remember after rebinding.", opaque("after-rebinding"))).status).toBe(202)
+      await waitUntil(async () => (await events(bird)).filter((event) => event.kind === "completed").length === 3)
+      expect(await savedThreadId(bird)).toBe(threadId)
+
+      await stopBird(bird)
+      bird = await startBird(directory, { BIRDS_BIND: "192.0.2.1" })
+      expect(bird.url).toBe(`http://bird.example:${nextPort}/`)
+      expect(await readFile(agentsPath, "utf8")).toBe(reboundPrompt)
+      expect(await savedThreadId(bird)).toBe(threadId)
+      expect((await events(bird)).filter((event) => event.kind === "started")).toHaveLength(3)
+    } finally {
+      await stopBird(bird)
+      if (occupied !== null) await occupied.stop(true)
+    }
+  }, 15_000)
+
+  test.each(["bird.example", "bird.example:0"])("updates an unmarked legacy prompt at %s without rewriting knowledge or historical addresses", async (startAddress) => {
+    const directory = join(await makeTemporaryDirectory(), "legacy-prompt")
+    await mkdir(directory)
+    await createBird(join(directory, "bird"), "legacy-prompt")
+    const agentsPath = join(directory, "bird", "workspace", "AGENTS.md")
+    const oldAddress = "http://old.example:3001/"
+    const knowledge = "Your initial private knowledge is:\n- Nacre-A's private phrase is “Legacy Harbor-71.”\n"
+    const history = `Historical note: ${oldAddress} was where we first met.\n`
+    await writeFile(agentsPath,
+      "Keep this hand-written introduction.\n\n" +
+      "- You can create another independent bird with `birds new <id> --host old.example`, then start it with `birds start <id> --detach`. The start command reports its address. Teach or introduce it through ordinary messages\n" +
+      `Your ID is legacy-prompt, and your address is ${oldAddress}.\n` +
+      knowledge + history,
+    )
+    const bird = await startBird(directory, {}, ["--address", startAddress, "--bind", "127.0.0.1"])
+
+    try {
+      const prompt = await readFile(agentsPath, "utf8")
+      expect(prompt).toContain("Keep this hand-written introduction.\n")
+      expect(prompt).toContain(knowledge)
+      expect(prompt).toContain(history)
+      expect(prompt).not.toContain(`Your ID is legacy-prompt, and your address is ${oldAddress}.`)
+      expect(prompt).not.toContain("new <id> --host")
+      expect(prompt).toContain(`Your ID is legacy-prompt, and your address is ${bird.url}.`)
+      expect(prompt).toContain("start <id> --address bird.example --bind 127.0.0.1 --detach")
+      expect(prompt.match(/<!-- birds:runtime -->/g)).toHaveLength(1)
+      expect(await events(bird)).toEqual([])
+    } finally {
+      await stopBird(bird)
+    }
+  })
+
   test.each(["matching", "conflicting", "empty", "busy", "unwritable"] as const)(
     "migrates legacy conversation state safely when %s",
     async (scenario) => {
       const directory = await makeTemporaryDirectory()
       const stateDirectory = join(directory, "bird")
-      const bird = await createBird(stateDirectory, "migration")
+      await createBird(stateDirectory, "migration")
       const metadataPath = join(stateDirectory, "bird.json")
       const legacyPath = join(stateDirectory, "thread-id")
       const threadId = crypto.randomUUID()
-      const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as { threadId: string | null }
+      const occupied = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("occupied") })
+      if (occupied.port === undefined) throw new Error("Expected an occupied TCP port")
+      const network = { host: "127.0.0.1", bind: "127.0.0.1", port: occupied.port }
+      const metadata: { id: string; host: string; bind: string; port: number; threadId: string | null } = {
+        id: "migration", ...network, threadId: null,
+      }
       switch (scenario) {
         case "matching": metadata.threadId = threadId; break
         case "conflicting": metadata.threadId = crypto.randomUUID(); break
@@ -211,9 +340,7 @@ describe("Hummingbirds", () => {
       const legacy = scenario === "empty" ? " \n" : `${threadId}\n`
       await writeFile(metadataPath, original)
       await writeFile(legacyPath, legacy)
-      const occupied = scenario === "busy"
-        ? Bun.serve({ hostname: bird.bind, port: bird.port, fetch: () => new Response("occupied") })
-        : null
+      if (scenario !== "busy") await occupied.stop(true)
       if (scenario === "unwritable") await mkdir(`${metadataPath}.tmp`)
       const child = Bun.spawn([process.execPath, "run", serverPath], {
         cwd: directory,
@@ -226,7 +353,7 @@ describe("Hummingbirds", () => {
         if (scenario === "matching") {
           await waitUntil(async () => !(await Bun.file(legacyPath).exists()))
           expect(await savedThreadId({ directory })).toBe(threadId)
-          expect(JSON.parse(await readFile(metadataPath, "utf8"))).toEqual(metadata)
+          expect(JSON.parse(await readFile(metadataPath, "utf8"))).toEqual({ id: "migration", network, threadId })
         } else {
           expect(await child.exited).not.toBe(0)
           expect(await readFile(metadataPath, "utf8")).toBe(original)
@@ -238,7 +365,7 @@ describe("Hummingbirds", () => {
       } finally {
         if (child.exitCode === null) child.kill()
         await child.exited
-        if (occupied !== null) await occupied.stop(true)
+        await occupied.stop(true)
       }
     },
     10_000,
@@ -266,12 +393,13 @@ describe("Hummingbirds", () => {
     try {
       await send(bird, "first", opaque("failed-first"))
       await waitUntil(async () => Bun.file(join(workspace, "turn-ready")).exists())
-      const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as object
-      await writeFile(metadataPath, JSON.stringify({ ...metadata, host: "updated.example" }))
+      const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as { network: { host: string; bind: string; port: number } }
+      const updated = { ...metadata, network: { ...metadata.network, host: "updated.example" } }
+      await writeFile(metadataPath, JSON.stringify(updated))
       await writeFile(join(workspace, "continue"), "")
       await waitUntil(async () => (await events(bird)).some((event) => event.kind === "failed"))
       expect(await savedThreadId(bird)).toBe(threadId)
-      expect(JSON.parse(await readFile(metadataPath, "utf8"))).toEqual({ ...metadata, host: "updated.example", threadId })
+      expect(JSON.parse(await readFile(metadataPath, "utf8"))).toEqual({ ...updated, threadId })
       expect(await Bun.file(join(stateDirectory, "thread-id")).exists()).toBe(false)
 
       await send(bird, "second", opaque("after-failed-first"))
@@ -688,7 +816,7 @@ describe("Hummingbirds", () => {
         stdout: "ignore",
       })
       expect(await obsoletePort.exited).not.toBe(0)
-      expect(await new Response(obsoletePort.stderr).text()).toContain("--port")
+      expect(await new Response(obsoletePort.stderr).text()).toContain("Usage:")
     } finally {
       await stopBird(bird)
     }
@@ -737,9 +865,10 @@ describe("Hummingbirds", () => {
       expect(received(await events(c), trainingRequest)).toEqual([["b", b.url, null, [a.url, b.url]]])
 
       const firstThreadId = await savedThreadId(a)
-      const port = Number(new URL(a.url).port)
+      const originalAddress = a.url
       await stopBird(a)
-      a = await startBird(a.directory, {}, port)
+      a = await startBird(a.directory)
+      expect(a.url).toBe(originalAddress)
       birds[2] = a
 
       const probeRequest = opaque("q-probe")
@@ -1019,8 +1148,8 @@ describe("Hummingbirds", () => {
       })
       const rules = join(configDirectory, "rules", "birds.rules")
       const commands = [
-        { argv: [...cliCommand, "new", "sprout", "--host", "bird.example"], allowed: true },
-        { argv: [...cliCommand, "start", "sprout", "--detach"], allowed: true },
+        { argv: [...cliCommand, "new", "sprout"], allowed: true },
+        { argv: [...cliCommand, "start", "sprout", "--address", "bird.example", "--bind", "0.0.0.0", "--detach"], allowed: true },
         { argv: [...cliCommand, "stop", "rules"], allowed: false },
         { argv: [...cliCommand, "list"], allowed: false },
         { argv: [process.execPath, "-e", "console.log('not a bird command')"], allowed: false },
@@ -1125,10 +1254,10 @@ describe("Hummingbirds", () => {
     const directory = join(root, "owned")
     await mkdir(directory)
     await createBird(join(directory, "bird"), "owned", {
-      host: "owned.example",
-      bind: "0.0.0.0",
       seed: "ONLY-THIS-BIRDS-SEED",
     })
+    const first = await startBird(directory, {}, ["--address", "owned.example", "--bind", "0.0.0.0"])
+    await stopBird(first)
     const bird = await startBird(directory, {
       BIRDS_HOME: "wrong-relative-home",
       BIRDS_HOST: "wrong-inherited-host.example",
@@ -1145,7 +1274,7 @@ describe("Hummingbirds", () => {
       expect(JSON.parse(await readFile(join(bird.directory, "bird", "workspace", "captured-environment.json"), "utf8"))).toEqual({
         BIRDS_HOME: bird.directory,
         BIRDS_HOST: null,
-        BIRDS_BIND: "0.0.0.0",
+        BIRDS_BIND: null,
         HUMMINGBIRDS_SEED: null,
         HUMMINGBIRDS_PEERS: null,
       })
@@ -1165,7 +1294,7 @@ describe("Hummingbirds", () => {
       HUMMINGBIRDS_CODEX: override,
       HUMMINGBIRDS_CODEX_ARGS: "--help",
       PATH: emptyPath,
-    }, 0, resolve("src/server.ts"))
+    }, undefined, resolve("src/server.ts"))
 
     try {
       const workspace = join(bird.directory, "bird", "workspace")
@@ -1274,7 +1403,7 @@ describe("Hummingbirds", () => {
 async function startBird(
   directory: string,
   environment: Record<string, string | undefined> = {},
-  port = 0,
+  serverArgs: string[] = [],
   entrypoint = serverPath,
 ): Promise<Bird> {
   await mkdir(directory, { recursive: true })
@@ -1283,12 +1412,11 @@ async function startBird(
     const peers = environment["HUMMINGBIRDS_PEERS"]
     const seed = environment["HUMMINGBIRDS_SEED"]
     await createBird(stateDirectory, basename(directory), {
-      ...(port === 0 ? {} : { port }),
       ...(peers === undefined ? {} : { peers }),
       ...(seed === undefined ? {} : { seed }),
     })
   }
-  const child = Bun.spawn([process.execPath, "run", entrypoint], {
+  const child = Bun.spawn([process.execPath, "run", entrypoint, ...serverArgs], {
     cwd: directory,
     env: {
       ...Bun.env,
@@ -1304,7 +1432,7 @@ async function startBird(
   try {
     for (;;) {
       const { done, value } = await reader.read()
-      if (done) throw new Error("Bird exited before announcing its address")
+      if (done) throw new Error(`Bird exited before announcing its address: ${await new Response(child.stderr).text()}`)
       output += new TextDecoder().decode(value)
       const end = output.indexOf("\n")
       if (end < 0) continue
@@ -1312,7 +1440,8 @@ async function startBird(
       return { directory, id: ready.id, process: child, url: ready.url }
     }
   } catch (error) {
-    child.kill()
+    if (child.exitCode === null) child.kill()
+    await child.exited
     throw error
   } finally {
     reader.releaseLock()
@@ -1329,7 +1458,7 @@ function startChat(
     [...cliCommand, "chat", destination],
     {
       cwd: directory,
-      // Server bind settings must not make a laptop listen for callbacks.
+      // A retired bind variable must not make a laptop listen for callbacks.
       env: { ...Bun.env, BIRDS_HOME: directory, BIRDS_BIND: "192.0.2.1" },
       terminal: {
         cols: 120,
