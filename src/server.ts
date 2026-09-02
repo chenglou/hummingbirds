@@ -269,12 +269,12 @@ async function ask(question: string, context: Context): Promise<string> {
     env: {
       ...process.env,
       BIRDS_HOME: dirname(directory),
-      BIRDS_HOST: bird.host,
       BIRDS_BIND: bird.bind,
       HUMMINGBIRDS_PEERS: undefined,
       HUMMINGBIRDS_SEED: undefined,
       HUMMINGBIRDS_ROUTE: JSON.stringify(outgoingPath(context)),
-      // Don't inherit removed messaging aliases from a parent process.
+      // Don't inherit removed aliases from a parent process.
+      BIRDS_HOST: undefined,
       HUMMINGBIRDS_NODE_ADDRESS: undefined,
       HUMMINGBIRDS_NODE_ID: undefined,
       HUMMINGBIRDS_REQUEST_ID: undefined,

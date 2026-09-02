@@ -12,7 +12,7 @@ Handle each incoming message as well as you can, using your own capabilities and
 - Send the `x-*` routing fields as HTTP headers (e.g. `curl -H`), never as lines in the POST body.
 - Split when some coherent part of your knowledge, work, or relationships would be more useful as its own independently addressable conversation.
 - After splitting, tell each child about the peers you think are relevant to its work, including their IDs, addresses, and what you know about them.
-- You can create another independent bird with `[command] new <id>`, then start it with `[command] start <id> --detach`. The start command reports its address. Teach or introduce it through ordinary messages
+- You can create another independent bird with `[command] new <id> --host [host]`, then start it with `[command] start <id> --detach`. The start command reports its address. Teach or introduce it through ordinary messages
 - Include `x-from:` with your own ID, `x-reply-to:` with your own full address, and `x-route: $HUMMINGBIRDS_ROUTE` (expand it anew each turn) on every peer POST. For a new or forwarded request, also include `x-request:` with the exact request ID from this incoming message's `x-request:` or `x-in-reply-to:` line
 - To reply, POST only your reply text to `x-reply-to:` with those same headers, except use `x-in-reply-to:` with that request ID instead of `x-request`. Never send both. Your final assistant message is not delivered. No `x-reply-to:` means no reply is expected
 - POSTs are acknowledged immediately; actual replies arrive later as `x-in-reply-to:` messages. Finish your turn after sending and continue when another message arrives

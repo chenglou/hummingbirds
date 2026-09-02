@@ -17,14 +17,14 @@ import { httpOrigin, localOrigin, networkSettings } from "./network.ts"
 
 const usage = `Usage:
   birds login [--device-auth]
-  birds new <id> [--port N]
+  birds new <id> [--host IP-or-hostname] [--port N]
   birds start <id> [--detach]
   birds chat <id | port | host:port | URL>
   birds stop <id>
   birds list
 
 Birds live in ~/.birds (override with BIRDS_HOME).
-Set BIRDS_HOST to this machine's reachable IP or hostname for networking.
+Use new --host for this machine's reachable IP or hostname (default: 127.0.0.1).
 BIRDS_BIND overrides the listening interface; both are saved by new.
 Chat receives replies through the bird's server; no local listening port is needed.
 Start stays in the foreground unless --detach is given.
@@ -58,12 +58,12 @@ try {
         const { positionals, values } = parseArgs({
           args,
           allowPositionals: true,
-          options: { port: { type: "string" } },
+          options: { host: { type: "string" }, port: { type: "string" } },
         })
         const id = oneArgument(positionals)
         await createBird(birdDirectory(id), id, {
           port: portOption(values.port),
-          ...networkSettings(Bun.env["BIRDS_HOST"], Bun.env["BIRDS_BIND"]),
+          ...networkSettings(values.host, Bun.env["BIRDS_BIND"]),
           peers: Bun.env["HUMMINGBIRDS_PEERS"] ?? "(none)",
           seed: Bun.env["HUMMINGBIRDS_SEED"] ?? "(none)",
         })

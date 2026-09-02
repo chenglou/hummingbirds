@@ -372,7 +372,7 @@ function launchChat(target: string, before = "") {
     "}",
   ].join("\n")
   const child = Bun.spawn([process.execPath, "--no-env-file", "--config=/dev/null", "-e", script], {
-    env: { ...Bun.env, BIRDS_HOST: "old-callback.invalid", BIRDS_BIND: "192.0.2.1" },
+    env: { ...Bun.env, BIRDS_BIND: "192.0.2.1" },
     stdin: "pipe", stdout: "pipe", stderr: "pipe",
   })
   const output = { stdout: "", stderr: "" }

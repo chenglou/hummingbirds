@@ -64,17 +64,13 @@ export async function createBird(directory: string, id: string, options: Options
   if (options.port !== undefined && (!Number.isSafeInteger(options.port) || options.port < 0 || options.port > 65_535)) {
     throw new Error("Bird port must be between 0 and 65535.")
   }
-  const maxBirds = Number(Bun.env["HUMMINGBIRDS_MAX_BIRDS"] ?? 32)
-  if (!Number.isSafeInteger(maxBirds) || maxBirds < 1) {
-    throw new Error("HUMMINGBIRDS_MAX_BIRDS must be a positive integer.")
-  }
   mkdirSync(root, { recursive: true, mode: 0o700 })
   mkdirSync(directory, { mode: 0o700 })
 
   const count = readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).length
-  if (count > maxBirds) {
+  if (count > 99) {
     rmdirSync(directory)
-    throw new Error("Local bird limit reached.")
+    throw new Error("Maximum birds count of 99 reached")
   }
 
   const requested = options.port ?? 0
@@ -109,6 +105,7 @@ export async function createBird(directory: string, id: string, options: Options
         .replaceAll("[id]", id)
         .replaceAll("[address]", `${httpOrigin(network.host, port)}/ask`)
         .replaceAll("[command]", command)
+        .replaceAll("[host]", network.host)
         .replaceAll("[peers]", options.peers ?? "(none)")
         .replaceAll("[seed]", options.seed ?? "(none)"),
     )

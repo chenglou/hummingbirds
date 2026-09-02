@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "fs/promises"
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { join } from "path"
 import { createTestInstallation } from "./installation.ts"
@@ -81,11 +81,15 @@ describe("birds", () => {
 
   test("creates separate stopped birds with explicit bootstrap data and isolates homes", async () => {
     const home = await makeHome()
-    const first = await command(home, ["new", "b"], { HUMMINGBIRDS_SEED: "B-ONLY-FACT-71" })
+    const first = await command(home, ["new", "b"], {
+      BIRDS_HOST: "ignored.invalid",
+      HUMMINGBIRDS_SEED: "B-ONLY-FACT-71",
+    })
     expect(first.code).toBe(0)
     expect(first.stdout).toContain("Created b.")
 
     const b = await metadata(home, "b")
+    expect(b.host).toBe("127.0.0.1")
     const peers = `- b at http://127.0.0.1:${b.port}/ask`
     const second = await command(home, ["new", "a"], { HUMMINGBIRDS_PEERS: peers })
     expect(second.code).toBe(0)
@@ -129,6 +133,8 @@ describe("birds", () => {
     expect((await command(otherHome, ["list"])).stdout).not.toContain(`:${a.port}/ask`)
     const help = await command(home, ["--help"])
     expect(help.code).toBe(0)
+    expect(help.stdout).toContain("--host")
+    expect(help.stdout).not.toContain("BIRDS_HOST")
     expect(help.stdout).not.toContain("--peer")
     const unsupported = await command(home, ["new", "unsupported", "--peer", "b"])
     expect(unsupported.code).not.toBe(0)
@@ -152,9 +158,7 @@ describe("birds", () => {
       env: {
         ...Bun.env,
         BIRDS_HOME: home,
-        BIRDS_HOST: undefined,
         BIRDS_BIND: undefined,
-        HUMMINGBIRDS_MAX_BIRDS: undefined,
         HUMMINGBIRDS_PEERS: undefined,
         HUMMINGBIRDS_SEED: undefined,
       },
@@ -213,8 +217,7 @@ describe("birds", () => {
 
   test("persists advertised networking across restarts and manages the bound interface locally", async () => {
     const home = await makeHome()
-    expect((await command(home, ["new", "networked"], {
-      BIRDS_HOST: "Bird.EXAMPLE",
+    expect((await command(home, ["new", "networked", "--host", "Bird.EXAMPLE"], {
       BIRDS_BIND: "127.0.0.1",
     })).code).toBe(0)
     const saved = await metadata(home, "networked")
@@ -224,7 +227,9 @@ describe("birds", () => {
     const promptPath = join(home, "networked", "workspace", "AGENTS.md")
     const prompt = await readFile(promptPath, "utf8")
     expect(prompt).toContain(`your address is ${address}.`)
-    const changedEnvironment = { BIRDS_HOST: "wrong.example", BIRDS_BIND: "192.0.2.1" }
+    expect(prompt).toContain("new <id> --host bird.example")
+    expect(prompt).not.toContain("[host]")
+    const changedEnvironment = { BIRDS_BIND: "192.0.2.1" }
 
     try {
       const started = await command(home, ["start", "networked", "--detach"], changedEnvironment)
@@ -246,6 +251,52 @@ describe("birds", () => {
     } finally {
       await stopIfRunning(home, "networked")
     }
+  })
+
+  test("rejects a host that could be mistaken for a CLI option", async () => {
+    const home = await makeHome()
+    const invalid = await command(home, ["new", "invalid", "--host=--help"], { BIRDS_BIND: "127.0.0.1" })
+    expect(invalid.code).toBe(1)
+    expect(invalid.stderr).toContain("Bird hosts must be IPs or hostnames")
+    expect(await readdir(home)).toEqual([])
+  })
+
+  test.each([
+    ["Bird.EXAMPLE", "bird.example"],
+    ["[2001:db8::7]", "2001:db8::7"],
+  ])("split commands copy %s into children and grandchildren", async (host, normalized) => {
+    const home = await makeHome()
+    expect((await command(home, ["new", "parent", "--host", host], { BIRDS_BIND: "127.0.0.1" })).code).toBe(0)
+
+    for (const [parent, id] of [["parent", "sprout"], ["sprout", "twig"]] as const) {
+      const creator = await metadata(home, parent)
+      const workspace = join(home, parent, "workspace")
+      const prompt = await readFile(join(workspace, "AGENTS.md"), "utf8")
+      expect(prompt).toContain(`new <id> --host ${normalized}`)
+      expect(prompt).not.toContain("[host]")
+      expect(prompt).not.toContain("[command]")
+      const creation = /`([^`\n]+ new <id>[^`\n]*)`/.exec(prompt)?.[1]
+      if (creation === undefined) throw new Error("Missing child creation command")
+
+      // Execute the generated instruction with the same home and bind a bird's model receives.
+      const child = Bun.spawn(["/bin/sh", "-c", creation.replace("<id>", id)], {
+        cwd: workspace,
+        env: {
+          ...Bun.env,
+          BIRDS_HOME: home,
+          BIRDS_BIND: creator.bind,
+          HUMMINGBIRDS_PEERS: undefined,
+          HUMMINGBIRDS_SEED: undefined,
+        },
+        stdout: "ignore",
+        stderr: "pipe",
+      })
+      const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+      expect({ code, stderr }).toEqual({ code: 0, stderr: "" })
+      expect(await metadata(home, id)).toMatchObject({ id, host: normalized, bind: "127.0.0.1" })
+    }
+    expect(await readFile(join(home, "twig", "workspace", "AGENTS.md"), "utf8"))
+      .toContain(`new <id> --host ${normalized}`)
   })
 
   test("migrates a legacy bird's session only when starting and keeps its original prompt and localhost address", async () => {
@@ -272,7 +323,6 @@ describe("birds", () => {
       expect(await readFile(threadPath, "utf8")).toBe(`${thread}\n`)
 
       const started = await command(home, ["start", "legacy", "--detach"], {
-        BIRDS_HOST: "not-this-machine.example",
         BIRDS_BIND: "192.0.2.1",
       })
       expect(started.code).toBe(0)
@@ -305,41 +355,38 @@ describe("birds", () => {
     }
   })
 
-  test("limits retained bird directories to 32 by default", async () => {
+  test("limits retained bird directories to 99", async () => {
     const home = await makeHome()
-    for (let index = 0; index < 32; index++) {
+    for (let index = 0; index < 99; index++) {
       expect((await command(home, ["new", `bird-${index}`])).code).toBe(0)
     }
     const overflow = await command(home, ["new", "overflow"])
-    expect(overflow.code).toBe(1)
-    expect(overflow.stderr).toContain("Local bird limit reached.")
-    expect(await readdir(home)).toHaveLength(32)
+    expect(overflow).toEqual({ code: 1, stderr: "Maximum birds count of 99 reached\n", stdout: "" })
+    expect(await readdir(home)).toHaveLength(99)
+    expect(await readdir(home)).not.toContain("overflow")
     expect(await Bun.file(join(home, "overflow", "bird.json")).exists()).toBe(false)
   }, 15_000)
 
-  test("validates the configured cap and never overbooks a concurrent last slot", async () => {
+  test("never overbooks the concurrent last slot of the 99-directory limit", async () => {
     const home = await makeHome()
-    for (const limit of ["0", "-1", "1.5", "NaN"]) {
-      const invalid = await command(home, ["new", "invalid"], { HUMMINGBIRDS_MAX_BIRDS: limit })
-      expect(invalid.code).toBe(1)
-      expect(invalid.stderr).toContain("positive integer")
-      expect(await readdir(home)).toEqual([])
-    }
-    const environment = { HUMMINGBIRDS_MAX_BIRDS: "2" }
-    expect((await command(home, ["new", "retained"], environment)).code).toBe(0)
+    expect((await command(home, ["new", "retained"])).code).toBe(0)
+    // The cap counts directories, so fill the other retained slots without extra CLI processes.
+    for (let index = 0; index < 97; index++) await mkdir(join(home, `retained-${index}`))
     const contenders = await Promise.all([
-      command(home, ["new", "last-a"], environment),
-      command(home, ["new", "last-b"], environment),
+      command(home, ["new", "last-a"]),
+      command(home, ["new", "last-b"]),
     ])
     expect(
-      contenders.every((result) => result.code === 0 || result.stderr.includes("Local bird limit reached.")),
+      contenders.every((result) => result.code === 0
+        || (result.code === 1 && result.stderr === "Maximum birds count of 99 reached\n")),
     ).toBe(true)
     const admitted = contenders.filter((result) => result.code === 0).length
     expect(admitted).toBeLessThanOrEqual(1)
     // Both reservations can see a full root before either rolls back.
-    if (admitted === 0) expect((await command(home, ["new", "last-retry"], environment)).code).toBe(0)
-    expect(await readdir(home)).toHaveLength(2)
-    expect((await command(home, ["new", "overflow"], environment)).stderr).toContain("Local bird limit reached.")
+    if (admitted === 0) expect((await command(home, ["new", "last-retry"])).code).toBe(0)
+    expect(await readdir(home)).toHaveLength(99)
+    expect(await command(home, ["new", "overflow"]))
+      .toEqual({ code: 1, stderr: "Maximum birds count of 99 reached\n", stdout: "" })
     expect(await readdir(home)).not.toContain("overflow")
     expect((await command(home, ["list"])).stdout).toContain("retained\tstopped\t")
   })
@@ -382,7 +429,7 @@ describe("birds", () => {
       let output = ""
       const decoder = new TextDecoder()
       const client = Bun.spawn([...cliCommand, "chat", "memory"], {
-        env: { ...Bun.env, BIRDS_HOME: home, BIRDS_HOST: undefined, BIRDS_BIND: undefined },
+        env: { ...Bun.env, BIRDS_HOME: home, BIRDS_BIND: undefined },
         terminal: {
           cols: 120,
           rows: 24,
@@ -598,9 +645,7 @@ function spawn(home: string, args: string[], environment: Record<string, string>
     env: {
       ...Bun.env,
       BIRDS_HOME: home,
-      BIRDS_HOST: undefined,
       BIRDS_BIND: undefined,
-      HUMMINGBIRDS_MAX_BIRDS: undefined,
       HUMMINGBIRDS_PEERS: undefined,
       HUMMINGBIRDS_SEED: undefined,
       ...environment,

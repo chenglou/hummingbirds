@@ -958,7 +958,7 @@ describe("Hummingbirds", () => {
       })
       const rules = join(configDirectory, "rules", "birds.rules")
       const commands = [
-        { argv: [...cliCommand, "new", "sprout"], allowed: true },
+        { argv: [...cliCommand, "new", "sprout", "--host", "bird.example"], allowed: true },
         { argv: [...cliCommand, "start", "sprout", "--detach"], allowed: true },
         { argv: [...cliCommand, "stop", "rules"], allowed: false },
         { argv: [...cliCommand, "list"], allowed: false },
@@ -1056,7 +1056,7 @@ describe("Hummingbirds", () => {
     const root = await makeTemporaryDirectory()
     const capture = join(root, "capture-environment.ts")
     await writeFile(capture, `#!${process.execPath}\n` +
-      `const names = ["BIRDS_HOME", "BIRDS_HOST", "BIRDS_BIND", "HUMMINGBIRDS_SEED", "HUMMINGBIRDS_PEERS", "HUMMINGBIRDS_MAX_BIRDS"]\n` +
+      `const names = ["BIRDS_HOME", "BIRDS_HOST", "BIRDS_BIND", "HUMMINGBIRDS_SEED", "HUMMINGBIRDS_PEERS"]\n` +
       `await Bun.stdin.text()\n` +
       `await Bun.write("captured-environment.json", JSON.stringify(Object.fromEntries(names.map(name => [name, Bun.env[name] ?? null]))))\n` +
       `console.log(JSON.stringify({ type: "thread.started", thread_id: crypto.randomUUID() }))\n`,
@@ -1075,7 +1075,6 @@ describe("Hummingbirds", () => {
       BIRDS_TEST_CODEX: capture,
       HUMMINGBIRDS_SEED: "ONLY-THIS-BIRDS-SEED",
       HUMMINGBIRDS_PEERS: "- initial at http://127.0.0.1:1/ask",
-      HUMMINGBIRDS_MAX_BIRDS: "3",
     })
 
     try {
@@ -1084,11 +1083,10 @@ describe("Hummingbirds", () => {
       await waitUntil(async () => (await events(bird)).some((event) => event.kind === "completed"))
       expect(JSON.parse(await readFile(join(bird.directory, "bird", "workspace", "captured-environment.json"), "utf8"))).toEqual({
         BIRDS_HOME: bird.directory,
-        BIRDS_HOST: "owned.example",
+        BIRDS_HOST: null,
         BIRDS_BIND: "0.0.0.0",
         HUMMINGBIRDS_SEED: null,
         HUMMINGBIRDS_PEERS: null,
-        HUMMINGBIRDS_MAX_BIRDS: "3",
       })
       expect(await readFile(join(bird.directory, "bird", "workspace", "AGENTS.md"), "utf8")).toContain("ONLY-THIS-BIRDS-SEED")
     } finally {
@@ -1270,8 +1268,8 @@ function startChat(
     [...cliCommand, "chat", destination],
     {
       cwd: directory,
-      // Old server settings must not make a laptop try to bind or advertise a callback.
-      env: { ...Bun.env, BIRDS_HOME: directory, BIRDS_HOST: "old-callback.invalid", BIRDS_BIND: "192.0.2.1" },
+      // Server bind settings must not make a laptop listen for callbacks.
+      env: { ...Bun.env, BIRDS_HOME: directory, BIRDS_BIND: "192.0.2.1" },
       terminal: {
         cols: 120,
         rows: 24,

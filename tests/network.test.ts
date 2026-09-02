@@ -13,7 +13,7 @@ test("separates advertised hosts from listening interfaces and local management"
   expect(networkSettings("[2001:db8::7]", "::")).toEqual({ host: "2001:db8::7", bind: "::" })
   expect(httpOrigin("2001:db8::7", 3001)).toBe("http://[2001:db8::7]:3001")
   expect(localOrigin({ host: "2001:db8::7", bind: "::", port: 3001 })).toBe("http://[::1]:3001")
-  for (const host of ["0.0.0.0", "::", "[::]", "", ".", "[::1", "::1]", "https://bird.example", "bird.example:3001", "bird.example:80", "user@bird.example", "bird.example/ask", " bird.example"]) {
+  for (const host of ["0.0.0.0", "::", "[::]", "", ".", "--help", "-bird.example", "[::1", "::1]", "https://bird.example", "bird.example:3001", "bird.example:80", "user@bird.example", "bird.example/ask", " bird.example"]) {
     expect(() => networkSettings(host)).toThrow()
   }
   expect(() => networkSettings("bird.example", "http://localhost")).toThrow()

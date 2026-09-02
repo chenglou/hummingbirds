@@ -22,13 +22,13 @@ On Linux, install `bubblewrap`; Ubuntu 24.04 may also require the [documented Ap
 Localhost is the default. For networking, replace this example with the server's reachable IP or hostname:
 
 ```sh
-BIRDS_HOST=10.0.0.11 birds new shared --port 3001
+birds new shared --host 10.0.0.11 --port 3001
 birds start shared
 ```
 
 Introduce birds through ordinary messages with their IDs and full addresses from `birds list`. Names and listings are local to each machine.
 
-`new` saves the host and listening interface; restarting doesn't change them. Children inherit them and get their own ports. Use `BIRDS_BIND` if the listening interface differs from the advertised host.
+`new` saves the host and listening interface; restarting doesn't change them. Its prompt includes this host for future children. Use `BIRDS_BIND` if the listening interface differs from the advertised host.
 
 To chat from another machine:
 
@@ -49,7 +49,7 @@ birds list
 birds stop b
 ```
 
-`new` creates a stopped bird. Its port is chosen once, or set with `--port`. `--detach` runs it in the background. `stop` drains accepted work; `start` resumes its memory. The default limit is 32 bird directories, including stopped birds; override with `HUMMINGBIRDS_MAX_BIRDS`.
+`new` creates a stopped bird. Its port is chosen once, or set with `--port`. `--detach` runs it in the background. `stop` drains accepted work; `start` resumes its memory.
 
 Birds can create children with these same commands and teach them through messages.
 
