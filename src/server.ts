@@ -68,6 +68,8 @@ const server = Bun.serve({
       return inboxes.handle(request)
     }
     switch (path) {
+      case "/":
+        return handleRequest(request)
       case "/control":
         return control(request)
       case "/events":
@@ -75,7 +77,7 @@ const server = Bun.serve({
           ? streamEvents()
           : new Response("GET /events", { status: 405 })
       default:
-        return handleRequest(request)
+        return new Response("Not found.", { status: 404 })
     }
   },
 })
@@ -90,7 +92,7 @@ if (existsSync(legacyThreadPath)) {
   writeBird({ ...readBird(directory), threadId })
   unlinkSync(legacyThreadPath)
 }
-const address = `${httpOrigin(bird.host, bird.port)}/ask`
+const address = `${httpOrigin(bird.host, bird.port)}/`
 // Codex makes an existing workspace/.codex read-only, including in temporary flocks.
 const codexDirectory = join(workspace, ".codex")
 mkdirSync(join(codexDirectory, "rules"), { recursive: true, mode: 0o700 })
@@ -175,8 +177,8 @@ function isStopping(): boolean {
 }
 
 async function handleRequest(request: Request): Promise<Response> {
-  if (request.method !== "POST" || new URL(request.url).pathname !== "/ask") {
-    return new Response("POST a plain-text message to /ask", { status: 404 })
+  if (request.method !== "POST") {
+    return new Response("POST a plain-text message.", { status: 405, headers: { allow: "POST" } })
   }
   if (stopping) return new Response("Bird is stopping.", { status: 503 })
   const incomingRequest = request.headers.get(headers.requestId)
@@ -394,7 +396,14 @@ function parsePath(raw: string | null): string[] | null {
     const value: unknown = JSON.parse(raw)
     if (!Array.isArray(value)) return null
     const addresses: unknown[] = value
-    return addresses.every((address): address is string => typeof address === "string") ? addresses : null
+    const normalized: string[] = []
+    for (const address of addresses) {
+      if (typeof address !== "string") return null
+      const url = new URL(address)
+      if (url.protocol !== "http:" && url.protocol !== "https:") return null
+      normalized.push(url.href)
+    }
+    return normalized
   } catch {
     return null
   }

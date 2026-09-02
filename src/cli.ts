@@ -93,7 +93,7 @@ try {
           state.child = child
           if (state.interrupted) child.kill("SIGTERM")
           if (values.detach === true && !state.interrupted) {
-            console.log(`Started ${bird.id} at ${httpOrigin(bird.host, bird.port)}/ask.`)
+            console.log(`Started ${bird.id} at ${httpOrigin(bird.host, bird.port)}/.`)
           } else {
             process.exitCode = await child.exited
           }
@@ -134,7 +134,7 @@ try {
           .map((entry) => readBird(join(root, entry.name)))
           .sort((a, b) => a.id.localeCompare(b.id))
         const rows = await Promise.all(birds.map(async (bird) => {
-          return `${bird.id}\t${await birdStatus(bird)}\t${httpOrigin(bird.host, bird.port)}/ask`
+          return `${bird.id}\t${await birdStatus(bird)}\t${httpOrigin(bird.host, bird.port)}/`
         }))
         console.log(["ID\tSTATUS\tADDRESS", ...rows].join("\n"))
         break

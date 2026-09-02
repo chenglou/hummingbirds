@@ -45,14 +45,10 @@ export function createInboxes(): { handle(request: Request): Promise<Response>; 
       })
     }
 
-    const match = /^\/inboxes\/([^/]+)(?:\/(ask|events))?$/.exec(url.pathname)
+    const match = /^\/inboxes\/([^/]+)(?:\/(events))?$/.exec(url.pathname)
     const inbox = inboxes.find((candidate) => candidate.id === match?.[1])
     if (inbox === undefined) return new Response("Inbox not found or expired.", { status: 404 })
-    if (match?.[2] === "ask") {
-      return request.method === "POST"
-        ? receive(request, inbox)
-        : new Response("POST a plain-text message.", { status: 405 })
-    }
+    if (match?.[2] === undefined && request.method === "POST") return receive(request, inbox)
     if (request.headers.get("authorization") !== `Bearer ${inbox.token}`) {
       return new Response("Unauthorized.", { status: 401 })
     }
@@ -69,7 +65,7 @@ export function createInboxes(): { handle(request: Request): Promise<Response>; 
       }
       return stream(inbox, after)
     }
-    if (request.method !== "DELETE") return new Response("DELETE the inbox.", { status: 405 })
+    if (request.method !== "DELETE") return new Response("POST a plain-text message or DELETE the inbox.", { status: 405 })
     finishReader(inbox)
     inboxes.splice(inboxes.indexOf(inbox), 1)
     return new Response(null, { status: 204 })

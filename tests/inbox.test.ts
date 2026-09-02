@@ -39,7 +39,7 @@ describe("hosted inboxes", () => {
     await secondReader.cancel()
   })
 
-  test("the write address does not authorize reading or deleting", async () => {
+  test("POST is public while reading and DELETE require the private token", async () => {
     const inboxes = setup()
     const first = await create(inboxes)
     const second = await create(inboxes)
@@ -50,11 +50,51 @@ describe("hosted inboxes", () => {
           method: path === "" ? "DELETE" : "GET", headers,
         }))
         expect(response.status).toBe(401)
+        expect(await response.text()).toBe("Unauthorized.")
       }
     }
     expect((await post(inboxes, first, "A sender needs only the write address.")).status).toBe(202)
+    const sent = await post(inboxes, first, "An unrelated token does not change public write access.", auth(second))
+    expect(sent.status).toBe(202)
+    expect(await sent.text()).toBe("Accepted by inbox.")
+    expect(sent.headers.has("authorization")).toBe(false)
     const stream = await reader(inboxes, first)
     expect(await event(stream)).toMatchObject({ body: "A sender needs only the write address." })
+    expect(await event(stream)).toEqual({
+      type: "message", seq: 2, from: "unknown", body: "An unrelated token does not change public write access.",
+      requestId: sent.headers.get("x-request"), inReplyTo: null,
+    })
+    await stream.cancel()
+  })
+
+  test("unsupported methods and subpaths neither deliver messages nor revoke an inbox", async () => {
+    const inboxes = setup()
+    const inbox = await create(inboxes)
+    const stream = await reader(inboxes, inbox)
+    for (const method of ["GET", "DELETE"]) {
+      expect((await inboxes.handle(new Request("http://birds/inboxes", { method }))).status).toBe(405)
+    }
+    for (const method of ["GET", "PUT", "PATCH", "HEAD"]) {
+      expect((await inboxes.handle(new Request(url(inbox), { method, headers: auth(inbox) }))).status).toBe(405)
+    }
+    for (const method of ["POST", "DELETE", "PUT"]) {
+      const response = await inboxes.handle(new Request(url(inbox, "/events"), {
+        method, headers: auth(inbox), body: "Must not be delivered.",
+      }))
+      expect(response.status).toBe(405)
+    }
+    for (const path of ["/messages", "/events/more", "/events/", "/"]) {
+      for (const method of ["POST", "DELETE", "GET"]) {
+        const response = await inboxes.handle(new Request(url(inbox, path), {
+          method, headers: auth(inbox), ...(method === "POST" ? { body: "Must not be delivered." } : {}),
+        }))
+        expect(response.status).toBe(404)
+        expect(await response.text()).toBe("Inbox not found or expired.")
+      }
+    }
+    expect((await inboxes.handle(new Request(`${url(inbox)}-missing`, { method: "POST", body: "Missing." }))).status).toBe(404)
+    await post(inboxes, inbox, "First actual message.")
+    expect(await event(stream)).toMatchObject({ seq: 1, body: "First actual message." })
     await stream.cancel()
   })
 
@@ -76,8 +116,8 @@ describe("hosted inboxes", () => {
     const valid = await post(inboxes, inbox, "new fact", {
       "x-request": requestId,
       "x-from": "ordinary-peer",
-      "x-reply-to": "http://peer.example:3001/ask",
-      "x-route": '["http://peer.example:3001/ask"]',
+      "x-reply-to": "http://peer.example:3001/",
+      "x-route": '["http://peer.example:3001/"]',
     })
     expect(valid.status).toBe(202)
     expect(valid.headers.get("x-request")).toBe(requestId)
@@ -158,7 +198,7 @@ describe("hosted inboxes", () => {
       pull(controller) { controller.enqueue(new Uint8Array(40_000).fill(120)) },
       cancel() { canceled = true },
     })
-    const response = await inboxes.handle(new Request(url(inbox, "/ask"), { method: "POST", body }))
+    const response = await inboxes.handle(new Request(url(inbox), { method: "POST", body }))
     expect(response.status).toBe(413)
     expect(canceled).toBe(true)
     await post(inboxes, inbox, "first actual message")
@@ -245,7 +285,7 @@ describe("hosted inboxes", () => {
       const inbox = await create(inboxes)
       let controller: ReadableStreamDefaultController<Uint8Array>
       const body = new ReadableStream<Uint8Array>({ start(value) { controller = value } })
-      const pending = inboxes.handle(new Request(url(inbox, "/ask"), { method: "POST", body }))
+      const pending = inboxes.handle(new Request(url(inbox), { method: "POST", body }))
       if (shutdown) inboxes.close()
       else await inboxes.handle(new Request(url(inbox), { method: "DELETE", headers: auth(inbox) }))
       controller!.enqueue(new TextEncoder().encode("too late"))
@@ -296,7 +336,7 @@ function auth(inbox: Credentials): Record<string, string> {
 }
 
 function post(inboxes: Inboxes, inbox: Credentials, body: string, headers: HeadersInit = {}): Promise<Response> {
-  return inboxes.handle(new Request(url(inbox, "/ask"), { method: "POST", headers, body }))
+  return inboxes.handle(new Request(url(inbox), { method: "POST", headers, body }))
 }
 
 async function reader(inboxes: Inboxes, inbox: Credentials, after = 0): Promise<ReadableStreamDefaultReader<Uint8Array>> {

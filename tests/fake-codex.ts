@@ -144,7 +144,7 @@ function sessionPath(threadId: string): string {
 }
 
 function parseInitialPeers(text: string): Peer[] {
-  return [...text.matchAll(/^- ([A-Za-z0-9_-]+) at (http:\/\/\S+\/ask)$/gm)].map((match) => ({
+  return [...text.matchAll(/^- ([A-Za-z0-9_-]+) at (https?:\/\/\S+)$/gm)].map((match) => ({
     address: match[2] ?? "",
     id: match[1] ?? "",
   }))
@@ -160,7 +160,7 @@ function answerFromPrivateKnowledge(text: string, incomingQuestion: string): str
 
 function learnContributors(peers: Peer[], response: string): void {
   for (const match of response.matchAll(
-    /Contributors?: ([A-Za-z0-9_-]+) at (http:\/\/\S+\/ask)/g,
+    /Contributors?: ([A-Za-z0-9_-]+) at (https?:\/\/\S+)/g,
   )) {
     const id = match[1] ?? ""
     const address = match[2] ?? ""

@@ -90,7 +90,7 @@ describe("birds", () => {
 
     const b = await metadata(home, "b")
     expect(b.host).toBe("127.0.0.1")
-    const peers = `- b at http://127.0.0.1:${b.port}/ask`
+    const peers = `- b at http://127.0.0.1:${b.port}/`
     const second = await command(home, ["new", "a"], { HUMMINGBIRDS_PEERS: peers })
     expect(second.code).toBe(0)
     const a = await metadata(home, "a")
@@ -108,8 +108,8 @@ describe("birds", () => {
 
     const listed = await command(home, ["list"])
     expect(listed.code).toBe(0)
-    expect(listed.stdout).toContain(`a\tstopped\thttp://127.0.0.1:${a.port}/ask`)
-    expect(listed.stdout).toContain(`b\tstopped\thttp://127.0.0.1:${b.port}/ask`)
+    expect(listed.stdout).toContain(`a\tstopped\thttp://127.0.0.1:${a.port}/`)
+    expect(listed.stdout).toContain(`b\tstopped\thttp://127.0.0.1:${b.port}/`)
     expect((await command(home, ["new", "a"])).code).not.toBe(0)
     for (const id of ["", "../escaped", "nested/child", "has spaces", "x".repeat(65)]) {
       expect((await command(home, ["new", id])).code).not.toBe(0)
@@ -130,7 +130,7 @@ describe("birds", () => {
 
     const otherHome = await makeHome()
     expect((await command(otherHome, ["new", "a"])).code).toBe(0)
-    expect((await command(otherHome, ["list"])).stdout).not.toContain(`:${a.port}/ask`)
+    expect((await command(otherHome, ["list"])).stdout).not.toContain(`:${a.port}/`)
     const help = await command(home, ["--help"])
     expect(help.code).toBe(0)
     expect(help.stdout).toContain("--host")
@@ -223,7 +223,7 @@ describe("birds", () => {
     const saved = await metadata(home, "networked")
     expect(saved.host).toBe("bird.example")
     expect(saved.bind).toBe("127.0.0.1")
-    const address = `http://bird.example:${saved.port}/ask`
+    const address = `http://bird.example:${saved.port}/`
     const promptPath = join(home, "networked", "workspace", "AGENTS.md")
     const prompt = await readFile(promptPath, "utf8")
     expect(prompt).toContain(`your address is ${address}.`)
@@ -318,7 +318,7 @@ describe("birds", () => {
       await writeFile(path, legacy)
       await writeFile(threadPath, `${thread}\n`)
 
-      expect((await command(home, ["list"])).stdout).toContain(`legacy\tstopped\thttp://127.0.0.1:${port}/ask`)
+      expect((await command(home, ["list"])).stdout).toContain(`legacy\tstopped\thttp://127.0.0.1:${port}/`)
       expect(await readFile(path, "utf8")).toBe(legacy)
       expect(await readFile(threadPath, "utf8")).toBe(`${thread}\n`)
 
@@ -326,7 +326,7 @@ describe("birds", () => {
         BIRDS_BIND: "192.0.2.1",
       })
       expect(started.code).toBe(0)
-      expect(started.stdout).toContain(`http://127.0.0.1:${port}/ask`)
+      expect(started.stdout).toContain(`http://127.0.0.1:${port}/`)
       expect((await metadata(home, "legacy")).threadId).toBe(thread)
       expect(await Bun.file(threadPath).exists()).toBe(false)
       expect((await post(port, "Keep my old state.")).status).toBe(202)
@@ -418,7 +418,7 @@ describe("birds", () => {
 
       const restarted = await command(home, ["start", "memory", "--detach"])
       expect(restarted.code).toBe(0)
-      expect(restarted.stdout).toContain(`http://127.0.0.1:${port}/ask`)
+      expect(restarted.stdout).toContain(`http://127.0.0.1:${port}/`)
       expect((await post(port, "Remember the second message.")).status).toBe(202)
       await waitUntil(async () => {
         return (await events(home, "memory")).filter((event) => event.kind === "completed").length === 2
@@ -561,7 +561,7 @@ describe("birds", () => {
       expect((await command(home, ["new", "sprout"])).code).toBe(0)
       const child = await metadata(home, "sprout")
       const prompt = await readFile(join(home, "sprout", "workspace", "AGENTS.md"), "utf8")
-      expect(prompt).toContain(`Your ID is sprout, and your address is http://127.0.0.1:${child.port}/ask.`)
+      expect(prompt).toContain(`Your ID is sprout, and your address is http://127.0.0.1:${child.port}/.`)
       expect(prompt).toContain("Your initial peers are:\n(none)")
       expect(prompt).not.toContain("--peer")
       expect(prompt).toContain("After splitting, tell each child about the peers you think are relevant to its work, including their IDs, addresses, and what you know about them.")
@@ -602,11 +602,11 @@ describe("birds", () => {
       expect((await command(home, ["stop", "parent"])).code).toBe(0)
       for (const [id, port] of [["sprout", child.port], ["twig", grandchild.port]] as const) {
         const requestId = crypto.randomUUID()
-        const response = await fetch(`http://127.0.0.1:${port}/ask`, {
+        const response = await fetch(`http://127.0.0.1:${port}/`, {
           method: "POST",
           headers: {
             "x-request": requestId,
-            "x-reply-to": `http://127.0.0.1:${inbox.port}/ask`,
+            "x-reply-to": `http://127.0.0.1:${inbox.port}/`,
           },
           body: "Still independent.",
         })
@@ -683,14 +683,14 @@ async function events(home: string, id: string): Promise<Event[]> {
 }
 
 async function post(port: number, message: string): Promise<Response> {
-  return fetch(`http://127.0.0.1:${port}/ask`, { method: "POST", body: message })
+  return fetch(`http://127.0.0.1:${port}/`, { method: "POST", body: message })
 }
 
 async function stalledPost(port: number, message: string) {
   const abort = new AbortController()
   const stream = new TransformStream<Uint8Array, Uint8Array>()
   const writer = stream.writable.getWriter()
-  const response = fetch(`http://127.0.0.1:${port}/ask`, {
+  const response = fetch(`http://127.0.0.1:${port}/`, {
     method: "POST",
     body: stream.readable,
     signal: abort.signal,

@@ -6,7 +6,7 @@ class ChatProtocolError extends Error {}
 
 export async function chat(target: string): Promise<void> {
   const origin = destination(target)
-  const address = new URL("/ask", origin).href
+  const address = origin.href
   const created = await fetch(new URL("/inboxes", origin), { method: "POST", signal: AbortSignal.timeout(10_000) })
   if (!created.ok) {
     throw new Error(created.status === 404
@@ -21,7 +21,7 @@ export async function chat(target: string): Promise<void> {
     throw new Error("The server returned an invalid reply inbox.")
   }
   const inboxURL = new URL(`/inboxes/${inbox.id}`, origin)
-  const inboxAddress = `${inboxURL.href}/ask`
+  const inboxAddress = inboxURL.href
   const authorization = `Bearer ${inbox.token}`
   const abort = new AbortController()
 
@@ -202,7 +202,7 @@ export async function chat(target: string): Promise<void> {
             if (!("callerId" in event) || typeof event.callerId !== "string") break
             active = {
               callerId: event.callerId,
-              replyTo: "replyTo" in event && typeof event.replyTo === "string" ? event.replyTo : null,
+              replyTo: "replyTo" in event && typeof event.replyTo === "string" ? messageAddress(event.replyTo) : null,
             }
             break
           }
@@ -241,32 +241,62 @@ export async function chat(target: string): Promise<void> {
   }
 
   function remember(id: string, peerAddress: string): void {
-    if (id === "human") return
-    const known = peers.find((peer) => peer.address === peerAddress)
-    if (known === undefined) peers.push({ id, address: peerAddress })
+    const address = messageAddress(peerAddress)
+    if (id === "human" || address === null) return
+    const known = peers.find((peer) => peer.address === address)
+    if (known === undefined) peers.push({ id, address })
     else known.id = id
   }
 
   function outgoingMessage(command: string): { address: string; recipient: string; message: string } | null {
     let words = shellWords(command)
-    const script = words.find((word) => /(?:^|\s)(?:\S+\/)?curl\s/.test(word))
-    if (script !== undefined) words = shellWords(script)
+    if (/^(?:.*\/)?(?:ba|z)?sh$/.test(words[0] ?? "")) {
+      const script = words.findIndex((word) => /^-[a-z]*c[a-z]*$/.test(word))
+      if (script < 0) return null
+      words = shellWords(words[script + 1] ?? "")
+    }
 
     const curl = words.findIndex((word) => word === "curl" || word.endsWith("/curl"))
     if (curl < 0) return null
-    const target = words.slice(curl + 1).find((word) => /^https?:\/\/\S+\/ask(?:\?\S*)?$/.test(word))
-    if (target === undefined) return null
-    const data = words.findIndex((word) => /^(?:--data(?:-binary|-raw)?|-d)(?:=.*)?$/.test(word))
-    const option = words[data]
-    if (option === undefined) return null
-    const separator = option.indexOf("=")
-    const message = separator < 0 ? words[data + 1] : option.slice(separator + 1)
-    if (message === undefined) return null
+    let target: string | null = null
+    let message: string | null = null
+    let method: string | null = null
+    for (let index = curl + 1; index < words.length; index += 1) {
+      const word = words[index] ?? ""
+      if ([";", "&&", "||", "|", "&"].includes(word)) break
+      const argument = /^(--[a-z-]+)(?:=(.*))?$|^(-[A-Za-z])(.+)?$/.exec(word)
+      const option = argument?.[1] ?? argument?.[3] ?? word
+      const data = ["-d", "--data", "--data-binary", "--data-raw"].includes(option)
+      if (data || ["-H", "--header", "-X", "--request", "--url", "-e", "--referer",
+        "-o", "--output", "-w", "--write-out", "-u", "--user", "-A", "--user-agent",
+        "-m", "--max-time", "--connect-timeout", "--retry", "--retry-delay"].includes(option)) {
+        const value = argument?.[2] ?? argument?.[4] ?? words[++index]
+        if (value === undefined) return null
+        if (data) {
+          if (message !== null) return null
+          message = value
+        } else if (option === "-X" || option === "--request") method = value
+        else if (option === "--url") {
+          if (target !== null) return null
+          target = value
+        }
+      } else if (/^-[sSfLk]+$/.test(word)
+        || /^--(?:silent|show-error|fail|fail-with-body|location|insecure|compressed|retry-all-errors|retry-connrefused)$/.test(word)) {
+        continue
+      } else {
+        // Unknown options can consume URL-looking values. Don't guess their destination.
+        if (word.startsWith("-") || target !== null) return null
+        target = word
+      }
+    }
+    if (target === null || message === null || (method !== null && method !== "POST")) return null
+    const address = messageAddress(target)
+    if (address === null) return null
 
-    const recipient = active?.replyTo === target
+    const recipient = active?.replyTo === address
       ? active.callerId
-      : (peers.find((peer) => peer.address === target)?.id ?? target)
-    return { address: target, recipient, message }
+      : (peers.find((peer) => peer.address === address)?.id ?? address)
+    return { address, recipient, message }
   }
 
   function render(text: string): void {
@@ -277,6 +307,15 @@ export async function chat(target: string): Promise<void> {
     process.stdout.write(`\r\x1b[2K${text}`)
     input.prompt(true)
     process.stdout.write(input.line)
+  }
+}
+
+function messageAddress(value: string): string | null {
+  try {
+    const url = new URL(value)
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null
+  } catch {
+    return null
   }
 }
 
@@ -327,7 +366,7 @@ function destination(requested: string): URL {
     throw new Error("Bird addresses must use http or https")
   }
   if (parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") {
-    throw new Error("Specify the bird's origin or port, without /ask or /events")
+    throw new Error("Specify the bird's origin or port, without a path, query, or fragment")
   }
   return parsed
 }

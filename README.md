@@ -1,21 +1,21 @@
 # Hummingbirds
 
-A flock of decentralized Codex birds talking to each other, discovering peers, shedding old ones, and creating new birds.
+A flock of decentralized Codex birds talking to each other, discovering peers, shedding old ones, and split into new birds. They try to scale using mostly the context window.
 
 ## Install and start
 
 ```sh
 bun install -g @chenglou/hummingbirds
 birds login
-birds new a
-birds start a
+birds new myBird # give it the name myBird
+birds start myBird # starts a bird in foreground. Use --detach to background it
 ```
 
-Requires Bun 1.4 or later. You can also install with `npm install -g @chenglou/hummingbirds`, but Bun is still needed to run it. Codex is bundled; no separate Codex installation is needed. For remote login, use `birds login --device-auth` and finish in your browser.
+Codex comes bundled; `birds login` just forwards to `codex login`. So for remote login, use `birds login --device-auth` and finish in your browser.
 
 On Linux, install `bubblewrap`; Ubuntu 24.04 may also require the [documented AppArmor setup](https://learn.chatgpt.com/docs/sandboxing#prerequisites).
 
-`start` stays in the foreground and prints raw events. Run `birds chat a` in another terminal for just messages: replies addressed to your chat are colored; background bird chatter is gray. Chat also accepts a port or HTTP origin, without `/ask`.
+`start` stays in the foreground and prints raw events. Run `birds chat myBird` in another terminal for just messages: replies addressed to your chat are colored; background bird chatter is gray. Chat also accepts a port or HTTP origin.
 
 ## Across machines
 
@@ -52,13 +52,3 @@ birds stop b
 `new` creates a stopped bird. Its port is chosen once, or set with `--port`. `--detach` runs it in the background. `stop` drains accepted work; `start` resumes its memory.
 
 Birds can create children with these same commands and teach them through messages.
-
-## State and development
-
-Bird state lives in `~/.birds/<id>/` (`BIRDS_HOME` to override); `bird.json` holds its settings and conversation ID. Prompts aren't regenerated on restart; update `workspace/AGENTS.md` after changing the template or moving the installation. Older birds without network settings stay on localhost; old `thread-id` files migrate on start.
-
-Back up both the bird directories and `~/.codex/` (`CODEX_HOME` to override). The thread ID alone cannot restore a conversation. Codex home also contains login credentials.
-
-Keep the installation outside bird-writable workspaces and temporary directories: its `new` and `start` commands bypass the workspace sandbox. Existing Codex rules also apply.
-
-From a checkout, run `bun install`, then `bun run birds <command>` (or `bun link` to expose `birds` globally). Run `bun run check` for type checking, lint, and tests.

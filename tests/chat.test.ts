@@ -16,14 +16,14 @@ const chatModule = resolve(import.meta.dir, "../src/chat.ts")
 const encoder = new TextEncoder()
 
 describe("hosted chat", () => {
-  test.each(["http://birds.test/ask", "https://birds.test/?key=bad", "https://birds.test/#bad"])(
+  test.each(["http://birds.test/messages", "https://birds.test/?key=bad", "https://birds.test/#bad"])(
     "rejects a non-origin destination before network access: %s",
     async (target) => {
       const client = launchChat(target, 'globalThis.fetch = () => { throw new Error("UNEXPECTED_FETCH") }')
       try {
         const result = await client.finished
         expect(result.code).toBe(1)
-        expect(result.stderr).toContain("without /ask or /events")
+        expect(result.stderr).toContain("without a path, query, or fragment")
         expect(result.stderr).not.toContain("UNEXPECTED_")
       } finally {
         await stopChat(client)
@@ -45,13 +45,13 @@ describe("hosted chat", () => {
     try {
       await waitUntil(() => client.output.stdout.includes("CHAT_READY"))
       await client.child.stdin.write("Hello remote bird.\n")
-      await waitUntil(() => bird.requests.some((request) => request.method === "POST" && new URL(request.url).pathname === "/ask"))
-      const sent = bird.requests.find((request) => new URL(request.url).pathname === "/ask")
+      await waitUntil(() => bird.requests.some((request) => request.method === "POST" && new URL(request.url).pathname === "/"))
+      const sent = bird.requests.find((request) => new URL(request.url).pathname === "/")
       const inbox = bird.allocations[0]
       if (sent === undefined || inbox === undefined) throw new Error("Missing chat request or inbox")
       expect(sent).toMatchObject({
         from: "human", authorization: null, body: "Hello remote bird.",
-        replyTo: `${origin}/inboxes/${inbox.id}/ask`,
+        replyTo: `${origin}/inboxes/${inbox.id}`,
       })
       const requestId = crypto.randomUUID()
       const reply = await post(bird, inbox, "\x1b[31mWhisper received: café 🐦\x1b[0m\nsecond line\n第三行", {
@@ -93,7 +93,7 @@ describe("hosted chat", () => {
       const result = await client.finished
       expect(result.code).toBe(0)
       expect(result.stderr).toBe("")
-      const sent = bird.requests.filter((request) => new URL(request.url).pathname === "/ask")
+      const sent = bird.requests.filter((request) => new URL(request.url).pathname === "/")
       expect(sent.map((request) => request.body)).toEqual(["First piped message", "Second piped message"])
       expect(sent[0]?.replyTo).toBe(sent[1]?.replyTo)
       const inbox = bird.allocations[0]
@@ -210,7 +210,7 @@ describe("hosted chat", () => {
     const bird = fixture({ respond: (request) => {
       if (new URL(request.url).pathname !== "/inboxes") return null
       switch (scenario) {
-        case "old server": return new Response("POST a plain-text message to /ask", { status: 404 })
+        case "old server": return new Response("Not found.", { status: 404 })
         case "invalid credentials": return Response.json({ id: "../../not-an-inbox", token: crypto.randomUUID() })
         case "non-JSON allocation": return new Response("not JSON")
       }
@@ -231,7 +231,7 @@ describe("hosted chat", () => {
   })
 
   test("does not retry a failed outgoing POST and revokes its inbox", async () => {
-    const bird = fixture({ respond: (request) => new URL(request.url).pathname === "/ask"
+    const bird = fixture({ respond: (request) => new URL(request.url).pathname === "/"
       ? new Response("Not accepted.", { status: 503 }) : null })
     const client = launchChat(bird.origin)
     try {
@@ -240,7 +240,7 @@ describe("hosted chat", () => {
       const result = await client.finished
       expect(result.code).toBe(1)
       expect(result.stderr).toContain("503: Not accepted.")
-      expect(bird.requests.filter((request) => new URL(request.url).pathname === "/ask")).toHaveLength(1)
+      expect(bird.requests.filter((request) => new URL(request.url).pathname === "/")).toHaveLength(1)
       expect(bird.requests.filter((request) => request.method === "DELETE")).toHaveLength(1)
       const inbox = bird.allocations[0]
       if (inbox === undefined) throw new Error("Missing hosted inbox")
@@ -252,8 +252,8 @@ describe("hosted chat", () => {
   })
 
   test("grays shared activity without dimming subsequent replies to this chat", async () => {
-    const peer = "http://192.0.2.10:41001/ask"
-    const otherChat = "http://192.0.2.11:41001/inboxes/other-chat/ask"
+    const peer = "http://192.0.2.10:41001/"
+    const otherChat = "http://192.0.2.11:41001/inboxes/other-chat"
     const bird = fixture({ events: [
       { kind: "started", callerId: "human", replyTo: otherChat },
       { type: "item.completed", item: { type: "agent_message", text: "Thinking aloud.\nStill thinking." } },
@@ -288,12 +288,12 @@ describe("hosted chat", () => {
   })
 
   test("keeps two same-named peers at different addresses", async () => {
-    const first = "http://192.0.2.10:41001/ask"
-    const second = "http://192.0.2.11:41001/ask"
+    const first = "http://192.0.2.10:41001"
+    const second = "http://192.0.2.11:41001/"
     const bird = fixture({ events: [
       { kind: "received", callerId: "a", replyTo: first },
       { kind: "received", callerId: "a", replyTo: second },
-      { type: "item.started", item: { type: "command_execution", command: "curl '" + first + "' --data-binary 'first machine'" } },
+      { type: "item.started", item: { type: "command_execution", command: "curl '" + first + "/' --data-binary 'first machine'" } },
       { type: "item.started", item: { type: "command_execution", command: "curl '" + second + "' --data-binary 'second machine'" } },
     ] })
     const client = launchChat(bird.origin)
@@ -312,10 +312,78 @@ describe("hosted chat", () => {
       await bird.close()
     }
   })
+
+  test("finds root and custom destinations without treating headers or data as URLs to send to", async () => {
+    const root = "http://192.0.2.10:41001/"
+    const custom = "https://worker.example/functions/calculate?units=cm"
+    const payload = "https://message.example/payload"
+    const literal = "curl https://message.example/not-a-command --data example"
+    const commands = [
+      `curl --referer https://header.example/source --data-binary '${payload}' '${root.slice(0, -1)}'`,
+      `curl --header='Content-Type: text/plain' --request=POST --data-raw=${payload} --url='${custom}'`,
+      "/bin/sh -lc " + JSON.stringify(`curl -H 'x-from: bird' -XPOST '${custom}' -d 'Wrapped message.'`),
+      `curl --data-binary '${literal}' '${custom}'`,
+      `curl --referer https://header.example/source --data-binary '${payload}'`,
+      `curl -X GET '${custom}' --data-binary 'NOT_A_POST'`,
+    ]
+    const bird = fixture({ events: [
+      { kind: "received", callerId: "root-peer", replyTo: root },
+      { kind: "received", callerId: "custom-peer", replyTo: custom },
+      ...commands.map((command) => ({ type: "item.started", item: { type: "command_execution", command } })),
+    ] })
+    const client = launchChat(bird.origin)
+    try {
+      await waitUntil(() => client.output.stdout.includes("CHAT_READY"))
+      await client.child.stdin.end()
+      const result = await client.finished
+      expect(result.code).toBe(0)
+      expect(result.stderr).toBe("")
+      expect(result.stdout).toBe([
+        `\x1b[90m→ root-peer  ${payload}\n\x1b[0m`,
+        `\x1b[90m→ custom-peer  ${payload}\n\x1b[0m`,
+        "\x1b[90m→ custom-peer  Wrapped message.\n\x1b[0m",
+        `\x1b[90m→ custom-peer  ${literal}\n\x1b[0m`,
+        "\x1b[90mbird: CHAT_READY\n\x1b[0m",
+      ].join(""))
+    } finally {
+      await stopChat(client)
+      await bird.close()
+    }
+  })
+
+  test("shows replies to its own inbox once, in color, even when the body looks like a URL", async () => {
+    const payload = "https://message.example/own-reply"
+    const bird = fixture({ events: (inbox) => {
+      const address = `${bird.origin}/inboxes/${inbox.id}`
+      return [
+        { kind: "started", callerId: "human", replyTo: address },
+        { type: "item.started", item: { type: "command_execution",
+          command: `curl -H 'x-from: peer' --data-binary '${payload}' '${address}'` } },
+      ]
+    } })
+    const client = launchChat(bird.origin)
+    try {
+      await waitUntil(() => client.output.stdout.includes("CHAT_READY"))
+      const inbox = bird.allocations[0]
+      if (inbox === undefined) throw new Error("Missing hosted inbox")
+      expect((await post(bird, inbox, payload, { "x-from": "peer" })).status).toBe(202)
+      await waitUntil(() => client.output.stdout.includes(payload))
+      await client.child.stdin.end()
+      const result = await client.finished
+      expect(result.code).toBe(0)
+      expect(result.stderr).toBe("")
+      const shade = 101 + Number(Bun.hash.wyhash("peer") % 6n)
+      expect(result.stdout).toBe("\x1b[90mbird: CHAT_READY\n\x1b[0m"
+        + `\x1b[30;${shade}m peer \x1b[0m ${payload}\n`)
+    } finally {
+      await stopChat(client)
+      await bird.close()
+    }
+  })
 })
 
 function fixture(options: {
-  events?: object[]
+  events?: object[] | ((inbox: Credentials) => object[])
   respond?: (request: Request) => Response | null
 } = {}) {
   const inboxes = createInboxes()
@@ -337,16 +405,19 @@ function fixture(options: {
         return response
       }
       if (path === "/events") {
+        const inbox = allocations[0]
+        if (inbox === undefined) throw new Error("Missing hosted inbox")
         const records = [
-          { id: "bird", url: "http://10.0.0.5:3001/ask" },
-          ...(options.events ?? []),
+          { id: "bird", url: "http://10.0.0.5:3001/" },
+          ...(typeof options.events === "function" ? options.events(inbox) : options.events ?? []),
           { type: "item.completed", item: { type: "agent_message", text: "CHAT_READY" } },
         ]
         return new Response(new ReadableStream<Uint8Array>({
           start(controller) { controller.enqueue(encoder.encode(records.map((record) => JSON.stringify(record)).join("\n") + "\n")) },
         }))
       }
-      return new Response(path === "/ask" ? "Accepted." : "Not found.", { status: path === "/ask" ? 202 : 404 })
+      const accepted = request.method === "POST" && path === "/"
+      return new Response(accepted ? "Accepted." : "Not found.", { status: accepted ? 202 : 404 })
     },
   })
   return {
@@ -356,7 +427,7 @@ function fixture(options: {
 }
 
 function post(bird: ReturnType<typeof fixture>, inbox: Credentials, body: string, headers: HeadersInit = {}): Promise<Response> {
-  return fetch(`${bird.origin}/inboxes/${inbox.id}/ask`, { method: "POST", headers, body })
+  return fetch(`${bird.origin}/inboxes/${inbox.id}`, { method: "POST", headers, body })
 }
 
 function launchChat(target: string, before = "") {

@@ -103,7 +103,7 @@ export async function createBird(directory: string, id: string, options: Options
       join(workspace, "AGENTS.md"),
       prompt
         .replaceAll("[id]", id)
-        .replaceAll("[address]", `${httpOrigin(network.host, port)}/ask`)
+        .replaceAll("[address]", `${httpOrigin(network.host, port)}/`)
         .replaceAll("[command]", command)
         .replaceAll("[host]", network.host)
         .replaceAll("[peers]", options.peers ?? "(none)")
