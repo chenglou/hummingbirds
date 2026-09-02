@@ -360,7 +360,12 @@ describe("Hummingbirds", () => {
       await waitUntil(async () => output.includes("Handled by interactive: Second typed message"))
       expect(output).not.toContain('{"')
       const coloredOutput = output.replaceAll("\u001b", "ESC")
-      expect(coloredOutput).not.toContain("ESC[90m")
+      expect(coloredOutput).toMatch(
+        /ESC\[90m← peer-a  Ordinary HTTP message\r?\n {4}Second line\r?\nESC\[0m/,
+      )
+      expect(coloredOutput).toMatch(
+        /ESC\[90minteractive: Handled by interactive: Ordinary HTTP message\r?\n {4}Second line\r?\nESC\[0m/,
+      )
       const promptColors = [...coloredOutput.matchAll(/ESC\[30;(10[1-6])m You ESC\[0m/g)].map(
         (match) => match[1],
       )
@@ -403,6 +408,7 @@ describe("Hummingbirds", () => {
       )
       expect(peer.messages[0]?.inReplyTo).toBeNull()
       expect(output.split(unknownPeer)).toHaveLength(2)
+      expect(output.replaceAll("\r\n", "\n")).toContain(`\u001b[90m${unknownPeer}\n\u001b[0m`)
 
       const peerQuestion = (await events(bird)).find(
         (event) => event.kind === "received" && event.question === peerMessage,

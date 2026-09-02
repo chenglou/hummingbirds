@@ -251,6 +251,42 @@ describe("hosted chat", () => {
     }
   })
 
+  test("grays shared activity without dimming subsequent replies to this chat", async () => {
+    const peer = "http://192.0.2.10:41001/ask"
+    const otherChat = "http://192.0.2.11:41001/inboxes/other-chat/ask"
+    const bird = fixture({ events: [
+      { kind: "started", callerId: "human", replyTo: otherChat },
+      { type: "item.completed", item: { type: "agent_message", text: "Thinking aloud.\nStill thinking." } },
+      { kind: "received", callerId: "peer", replyTo: peer, question: "Checking in.\nPeer details." },
+      { type: "item.started", item: { type: "command_execution", command: "curl '" + peer + "' --data-binary 'For the peer.'" } },
+      { type: "item.started", item: { type: "command_execution", command: "curl '" + otherChat + "' --data-binary 'For another chat.'" } },
+    ] })
+    const client = launchChat(bird.origin)
+    try {
+      await waitUntil(() => client.output.stdout.includes("CHAT_READY"))
+      const inbox = bird.allocations[0]
+      if (inbox === undefined) throw new Error("Missing hosted inbox")
+      expect((await post(bird, inbox, "For this chat.\n\nMore details.", { "x-from": "peer" })).status).toBe(202)
+      await waitUntil(() => client.output.stdout.includes("More details."))
+      await client.child.stdin.end()
+      const result = await client.finished
+      expect(result.code).toBe(0)
+      expect(result.stderr).toBe("")
+      const shade = 101 + Number(Bun.hash.wyhash("peer") % 6n)
+      expect(result.stdout).toBe([
+        "\x1b[90mbird: Thinking aloud.\n    Still thinking.\n\x1b[0m",
+        "\x1b[90m← peer  Checking in.\n    Peer details.\n\x1b[0m",
+        "\x1b[90m→ peer  For the peer.\n\x1b[0m",
+        "\x1b[90m→ human  For another chat.\n\x1b[0m",
+        "\x1b[90mbird: CHAT_READY\n\x1b[0m",
+        `\x1b[30;${shade}m peer \x1b[0m For this chat.\n    \n    More details.\n`,
+      ].join(""))
+    } finally {
+      await stopChat(client)
+      await bird.close()
+    }
+  })
+
   test("keeps two same-named peers at different addresses", async () => {
     const first = "http://192.0.2.10:41001/ask"
     const second = "http://192.0.2.11:41001/ask"

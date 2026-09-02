@@ -237,7 +237,7 @@ export async function chat(target: string): Promise<void> {
         }
       }
     }
-    if (pretty !== "") render(pretty)
+    if (pretty !== "") render(`\x1b[90m${pretty}\x1b[0m`)
   }
 
   function remember(id: string, peerAddress: string): void {
