@@ -18,10 +18,7 @@ export const cliCommand = [
   require.resolve("./cli.ts"),
 ]
 
-const executable = Bun.env["HUMMINGBIRDS_CODEX"]
-export const codexCommand = executable === undefined
-  ? [...bunCommand, require.resolve("@openai/codex/bin/codex.js")]
-  : [executable]
+export const codexCommand = [...bunCommand, require.resolve("@openai/codex/bin/codex.js")]
 
 export function birdHome(): string {
   return resolve(Bun.env["BIRDS_HOME"] ?? join(homedir(), ".birds"))

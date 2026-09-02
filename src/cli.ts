@@ -7,6 +7,7 @@ import {
   birdDirectory,
   birdHome,
   birdStatus,
+  codexCommand,
   createBird,
   readBird,
   startBird,
@@ -15,6 +16,7 @@ import {
 import { httpOrigin, localOrigin, networkSettings } from "./network.ts"
 
 const usage = `Usage:
+  birds login [--device-auth]
   birds new <id> [--port N]
   birds start <id> [--detach]
   birds chat <id | port | host:port | URL>
@@ -31,10 +33,27 @@ Stop drains accepted work and preserves memory.`
 const [command, ...args] = process.argv.slice(2)
 
 try {
-  if (command === undefined || command === "help" || command === "--help" || args.includes("--help")) {
+  if (command === undefined || command === "help" || command === "--help"
+    || (command !== "login" && args.includes("--help"))) {
     console.log(usage)
   } else {
     switch (command) {
+      case "login": {
+        const child = Bun.spawn([...codexCommand, "login", ...args], {
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        })
+        const interrupt = () => child.kill("SIGTERM")
+        const signals = ["SIGINT", "SIGTERM", "SIGHUP"] as const
+        for (const signal of signals) process.on(signal, interrupt)
+        try {
+          process.exitCode = await child.exited
+        } finally {
+          for (const signal of signals) process.off(signal, interrupt)
+        }
+        break
+      }
       case "new": {
         const { positionals, values } = parseArgs({
           args,

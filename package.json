@@ -1,7 +1,19 @@
 {
-  "name": "hummingbirds",
-  "version": "0.0.0",
-  "private": true,
+  "name": "@chenglou/hummingbirds",
+  "version": "0.1.0",
+  "description": "A decentralized flock of agents that discover peers, exchange knowledge, and create new birds.",
+  "license": "MIT",
+  "author": "Cheng Lou",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chenglou/hummingbirds.git"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "bin": {
     "birds": "src/cli.ts"

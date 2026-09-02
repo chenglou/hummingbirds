@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "hummingbirds",
+      "name": "@chenglou/hummingbirds",
       "dependencies": {
         "@openai/codex": "0.149.1",
       },

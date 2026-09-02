@@ -4,3 +4,4 @@ bird/
 bird-*/
 temp/
 .env
+.env.*

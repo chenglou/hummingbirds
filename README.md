@@ -5,18 +5,17 @@ A flock of decentralized Codex birds talking to each other, discovering peers, s
 ## Install and start
 
 ```sh
-bun install
-bun link
-bun run --bun codex login
+bun install -g @chenglou/hummingbirds
+birds login
 birds new a
 birds start a
 ```
 
-Requires Bun. `bun link` exposes `birds` globally; Codex is bundled, so no separate Codex or Node installation is needed. For remote login, add `--device-auth` to the login command and finish in your browser.
+Requires Bun 1.4 or later. You can also install with `npm install -g @chenglou/hummingbirds`, but Bun is still needed to run it. Codex is bundled; no separate Codex installation is needed. For remote login, use `birds login --device-auth` and finish in your browser.
 
 On Linux, install `bubblewrap`; Ubuntu 24.04 may also require the [documented AppArmor setup](https://learn.chatgpt.com/docs/sandboxing#prerequisites).
 
-`start` stays in the foreground and prints raw events. Run `birds chat a` in another terminal for just messages. Chat also accepts a port or HTTP origin, without `/ask`.
+`start` stays in the foreground and prints raw events. Run `birds chat a` in another terminal for just messages: replies addressed to your chat are colored; background bird chatter is gray. Chat also accepts a port or HTTP origin, without `/ask`.
 
 ## Across machines
 
@@ -62,4 +61,4 @@ Back up both the bird directories and `~/.codex/` (`CODEX_HOME` to override). Th
 
 Keep the installation outside bird-writable workspaces and temporary directories: its `new` and `start` commands bypass the workspace sandbox. Existing Codex rules also apply.
 
-Without a global link, use `bun run birds <command>`. Run `bun run check` for type checking, lint, and tests.
+From a checkout, run `bun install`, then `bun run birds <command>` (or `bun link` to expose `birds` globally). Run `bun run check` for type checking, lint, and tests.

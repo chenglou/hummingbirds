@@ -1,21 +1,84 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, readdir, realpath, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
-import { join, resolve } from "path"
-import { cliCommand } from "../src/local.ts"
+import { join } from "path"
+import { createTestInstallation } from "./installation.ts"
 
 type Result = { code: number; stderr: string; stdout: string }
 type Event = { kind: string }
 type Metadata = { id: string; port: number; host: string; bind: string; threadId: string | null }
 
-const fakeCodex = resolve("tests/fake-codex.ts")
 const homes: string[] = []
+const { cliCommand } = await createTestInstallation(await makeHome())
 
 afterAll(async () => {
   await Promise.all(homes.map((home) => rm(home, { force: true, recursive: true })))
 })
 
 describe("birds", () => {
+  test("login forwards Codex options, input, diagnostics, and exit status", async () => {
+    const home = await makeHome()
+    const login = join(home, "login.ts")
+    await writeFile(login, `#!${process.execPath}\n` +
+      `console.log(JSON.stringify(process.argv.slice(2)))\n` +
+      `console.error("Login diagnostics.")\n` +
+      `if (!process.argv.includes("--help")) { console.log(await Bun.stdin.text()); process.exitCode = 7 }\n`,
+    { mode: 0o700 })
+
+    const help = await command(home, ["login", "--device-auth", "--help"], { BIRDS_TEST_CODEX: login })
+    expect(help).toEqual({
+      code: 0,
+      stdout: '["login","--device-auth","--help"]\n',
+      stderr: "Login diagnostics.\n",
+    })
+
+    const child = Bun.spawn([...cliCommand, "login", "--with-api-key"], {
+      env: { ...Bun.env, BIRDS_HOME: home, BIRDS_TEST_CODEX: login },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    await child.stdin.write("not-a-real-credential\n")
+    await child.stdin.end()
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ])
+    expect({ code, stdout, stderr }).toEqual({
+      code: 7,
+      stdout: '["login","--with-api-key"]\nnot-a-real-credential\n\n',
+      stderr: "Login diagnostics.\n",
+    })
+  })
+
+  test("interrupting login terminates its waiting child", async () => {
+    const home = await makeHome()
+    const login = join(home, "waiting-login.ts")
+    await writeFile(login, `#!${process.execPath}\n` +
+      `process.on("SIGTERM", () => { console.log("Login cancelled."); process.exit(0) })\n` +
+      `console.log("Waiting for login.")\n` +
+      `setInterval(() => {}, 1000)\n`,
+    { mode: 0o700 })
+    const child = spawn(home, ["login"], { BIRDS_TEST_CODEX: login })
+    let output = ""
+    const reading = (async () => {
+      const decoder = new TextDecoder()
+      for await (const chunk of child.stdout) output += decoder.decode(chunk, { stream: true })
+    })()
+    try {
+      await waitUntil(async () => output.includes("Waiting for login."))
+      child.kill("SIGINT")
+      await waitUntil(async () => child.exitCode !== null)
+      await reading
+      expect(child.exitCode).toBe(0)
+      expect(output).toContain("Login cancelled.")
+      expect(await new Response(child.stderr).text()).toBe("")
+    } finally {
+      if (child.exitCode === null) child.kill("SIGTERM")
+      await child.exited
+      await reading
+    }
+  })
+
   test("creates separate stopped birds with explicit bootstrap data and isolates homes", async () => {
     const home = await makeHome()
     const first = await command(home, ["new", "b"], { HUMMINGBIRDS_SEED: "B-ONLY-FACT-71" })
@@ -117,7 +180,7 @@ describe("birds", () => {
       `console.log(JSON.stringify({ type: "thread.started", thread_id: crypto.randomUUID() }))\n`,
     { mode: 0o700 })
     try {
-      const started = await command(home, ["start", "pinned", "--detach"], { HUMMINGBIRDS_CODEX: capture })
+      const started = await command(home, ["start", "pinned", "--detach"], { BIRDS_TEST_CODEX: capture })
       expect(started.code).toBe(0)
       const { port } = await metadata(home, "pinned")
       expect((await post(port, "Inspect the launch environment.")).status).toBe(202)
@@ -319,7 +382,7 @@ describe("birds", () => {
       let output = ""
       const decoder = new TextDecoder()
       const client = Bun.spawn([...cliCommand, "chat", "memory"], {
-        env: { ...Bun.env, BIRDS_HOME: home, BIRDS_HOST: undefined, BIRDS_BIND: undefined, HUMMINGBIRDS_CODEX: fakeCodex },
+        env: { ...Bun.env, BIRDS_HOME: home, BIRDS_HOST: undefined, BIRDS_BIND: undefined },
         terminal: {
           cols: 120,
           rows: 24,
@@ -537,7 +600,6 @@ function spawn(home: string, args: string[], environment: Record<string, string>
       BIRDS_HOME: home,
       BIRDS_HOST: undefined,
       BIRDS_BIND: undefined,
-      HUMMINGBIRDS_CODEX: fakeCodex,
       HUMMINGBIRDS_MAX_BIRDS: undefined,
       HUMMINGBIRDS_PEERS: undefined,
       HUMMINGBIRDS_SEED: undefined,

@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises"
 import { tmpdir } from "os"
 import { basename, dirname, join, resolve } from "path"
-import { cliCommand, createBird } from "../src/local.ts"
+import { createTestInstallation } from "./installation.ts"
 
 type Bird = {
   directory: string
@@ -28,8 +28,8 @@ type Event = {
 
 type Message = { body: string; from: string; inReplyTo: string | null; request: string | null }
 
-const fakeCodex = resolve("tests/fake-codex.ts")
 const temporaryDirectories: string[] = []
+const { cliCommand, createBird, serverPath } = await createTestInstallation(await makeTemporaryDirectory())
 
 afterAll(async () => {
   await Promise.all(
@@ -161,9 +161,9 @@ describe("Hummingbirds", () => {
         ? Bun.serve({ hostname: bird.bind, port: bird.port, fetch: () => new Response("occupied") })
         : null
       if (scenario === "unwritable") await mkdir(`${metadataPath}.tmp`)
-      const child = Bun.spawn([process.execPath, "run", resolve("src/server.ts")], {
+      const child = Bun.spawn([process.execPath, "run", serverPath], {
         cwd: directory,
-        env: { ...Bun.env, HUMMINGBIRDS_CODEX: fakeCodex, HUMMINGBIRDS_DIRECTORY: stateDirectory },
+        env: { ...Bun.env, HUMMINGBIRDS_DIRECTORY: stateDirectory },
         stdout: "pipe",
         stderr: "pipe",
       })
@@ -204,7 +204,7 @@ describe("Hummingbirds", () => {
       `  process.exit(7)\n` +
       `}\n`,
     { mode: 0o700 })
-    const bird = await startBird(join(root, "first-turn"), { HUMMINGBIRDS_CODEX: capture })
+    const bird = await startBird(join(root, "first-turn"), { BIRDS_TEST_CODEX: capture })
     const stateDirectory = join(bird.directory, "bird")
     const workspace = join(stateDirectory, "workspace")
     const metadataPath = join(stateDirectory, "bird.json")
@@ -236,11 +236,10 @@ describe("Hummingbirds", () => {
     await createBird(join(directory, "bird"), "foreground")
     const decoder = new TextDecoder()
     let output = ""
-    const child = Bun.spawn([process.execPath, "run", resolve("src/server.ts")], {
+    const child = Bun.spawn([process.execPath, "run", serverPath], {
       cwd: directory,
       env: {
         ...Bun.env,
-        HUMMINGBIRDS_CODEX: fakeCodex,
         HUMMINGBIRDS_DIRECTORY: join(directory, "bird"),
       },
       terminal: {
@@ -614,7 +613,7 @@ describe("Hummingbirds", () => {
         }
       }
 
-      const invalid = Bun.spawn([process.execPath, "run", resolve("src/cli.ts"), "chat", bird.url], {
+      const invalid = Bun.spawn([...cliCommand, "chat", bird.url], {
         cwd: bird.directory,
         env: { ...Bun.env, BIRDS_HOME: bird.directory },
         stderr: "pipe",
@@ -623,7 +622,7 @@ describe("Hummingbirds", () => {
       expect(await invalid.exited).not.toBe(0)
       expect(await new Response(invalid.stderr).text()).toContain("without /ask or /events")
 
-      const obsoletePort = Bun.spawn([process.execPath, "run", resolve("src/cli.ts"), "chat", port, "--port", "50533"], {
+      const obsoletePort = Bun.spawn([...cliCommand, "chat", port, "--port", "50533"], {
         cwd: bird.directory,
         env: { ...Bun.env, BIRDS_HOME: bird.directory },
         stderr: "pipe",
@@ -964,7 +963,7 @@ describe("Hummingbirds", () => {
         { argv: [...cliCommand, "stop", "rules"], allowed: false },
         { argv: [...cliCommand, "list"], allowed: false },
         { argv: [process.execPath, "-e", "console.log('not a bird command')"], allowed: false },
-        { argv: [process.execPath, require.resolve("../src/cli.ts"), "new", "sprout"], allowed: false },
+        { argv: [process.execPath, ...cliCommand.slice(-1), "new", "sprout"], allowed: false },
         { argv: [...cliCommand.map((arg) => arg.startsWith("--cwd=") ? `--cwd=${bird.directory}` : arg), "new", "sprout"], allowed: false },
         { argv: [process.execPath, "--preload", "other.ts", ...cliCommand.slice(1), "new", "sprout"], allowed: false },
         { argv: [...cliCommand.slice(0, -1), join(bird.directory, "other.ts"), "new", "sprout"], allowed: false },
@@ -1073,7 +1072,7 @@ describe("Hummingbirds", () => {
       BIRDS_HOME: "wrong-relative-home",
       BIRDS_HOST: "wrong-inherited-host.example",
       BIRDS_BIND: "192.0.2.1",
-      HUMMINGBIRDS_CODEX: capture,
+      BIRDS_TEST_CODEX: capture,
       HUMMINGBIRDS_SEED: "ONLY-THIS-BIRDS-SEED",
       HUMMINGBIRDS_PEERS: "- initial at http://127.0.0.1:1/ask",
       HUMMINGBIRDS_MAX_BIRDS: "3",
@@ -1097,15 +1096,17 @@ describe("Hummingbirds", () => {
     }
   })
 
-  test("runs the packaged Codex without a globally installed Codex or Node", async () => {
+  test("runs only the packaged Codex, ignoring executable overrides and global installations", async () => {
     const root = await makeTemporaryDirectory()
     const emptyPath = join(root, "empty-path")
     await mkdir(emptyPath)
+    const override = join(root, "must-not-run")
+    await writeFile(override, `#!${process.execPath}\nthrow new Error("Executable override must not run")\n`, { mode: 0o700 })
     const bird = await startBird(join(root, "packaged"), {
-      HUMMINGBIRDS_CODEX: undefined,
+      HUMMINGBIRDS_CODEX: override,
       HUMMINGBIRDS_CODEX_ARGS: "--help",
       PATH: emptyPath,
-    })
+    }, 0, resolve("src/server.ts"))
 
     try {
       const workspace = join(bird.directory, "bird", "workspace")
@@ -1215,6 +1216,7 @@ async function startBird(
   directory: string,
   environment: Record<string, string | undefined> = {},
   port = 0,
+  entrypoint = serverPath,
 ): Promise<Bird> {
   await mkdir(directory, { recursive: true })
   const stateDirectory = join(directory, "bird")
@@ -1227,11 +1229,10 @@ async function startBird(
       ...(seed === undefined ? {} : { seed }),
     })
   }
-  const child = Bun.spawn([process.execPath, "run", resolve("src/server.ts")], {
+  const child = Bun.spawn([process.execPath, "run", entrypoint], {
     cwd: directory,
     env: {
       ...Bun.env,
-      HUMMINGBIRDS_CODEX: fakeCodex,
       HUMMINGBIRDS_DIRECTORY: stateDirectory,
       ...environment,
     },
@@ -1266,7 +1267,7 @@ function startChat(
 ) {
   const decoder = new TextDecoder()
   return Bun.spawn(
-    [process.execPath, "run", resolve("src/cli.ts"), "chat", destination],
+    [...cliCommand, "chat", destination],
     {
       cwd: directory,
       // Old server settings must not make a laptop try to bind or advertise a callback.
