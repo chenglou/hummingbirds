@@ -1,17 +1,15 @@
 // One bird: an HTTP server that hands each message to a persistent Codex
 // conversation. Each independently managed bird directory holds:
-//   bird.json     its durable identity and network addresses
+//   bird.json     its identity, network addresses, and Codex conversation ID
 //   run.json      the current process's private lifecycle-control token
-//   thread-id     the Codex conversation to resume (created on the first message)
 //   events.jsonl  a log of every message, for inspection only
 //   workspace/    Codex's working directory, where AGENTS.md tells the bird who it is
 //     .codex/     generated permissions and narrow CLI rules, protected by Codex
 // Nobody waits on the line: a message is acknowledged at once, the turn runs in its
 // own time, and the bird POSTs whatever it has to say to the message's x-reply-to address.
-import { appendFileSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "fs"
-import { rename } from "fs/promises"
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs"
 import { dirname, join, resolve } from "path"
-import { cliCommand, codexCommand, readBird } from "./local"
+import { cliCommand, codexCommand, readBird, writeBird } from "./local"
 import { httpOrigin } from "./network.ts"
 
 const headers = {
@@ -49,7 +47,6 @@ const codexArgs = (Bun.env["HUMMINGBIRDS_CODEX_ARGS"] ?? "")
   .split(/\s+/)
   .filter((arg) => arg !== "")
 const workspace = join(directory, "workspace")
-const threadIdPath = join(directory, "thread-id")
 const eventsPath = join(directory, "events.jsonl")
 const subscribers: ReadableStreamDefaultController<Uint8Array>[] = []
 const encoder = new TextEncoder()
@@ -75,6 +72,17 @@ const server = Bun.serve({
     }
   },
 })
+// Only migrate after owning the port: an older running server still reads this file.
+const legacyThreadPath = join(directory, "thread-id")
+if (existsSync(legacyThreadPath)) {
+  const threadId = readFileSync(legacyThreadPath, "utf8").trim()
+  if (threadId === "") throw new Error(`${legacyThreadPath} is empty`)
+  if (bird.threadId !== null && bird.threadId !== threadId) {
+    throw new Error("bird.json and thread-id refer to different conversations.")
+  }
+  writeBird({ ...readBird(directory), threadId })
+  unlinkSync(legacyThreadPath)
+}
 const address = `${httpOrigin(bird.host, bird.port)}/ask`
 // Codex makes an existing workspace/.codex read-only, including in temporary flocks.
 const codexDirectory = join(workspace, ".codex")
@@ -233,10 +241,7 @@ async function reportFailure(replyTo: string, message: string, context: Context)
 }
 
 async function ask(question: string, context: Context): Promise<string> {
-  const threadIdFile = Bun.file(threadIdPath)
-  const threadId = (await threadIdFile.exists()) ? (await threadIdFile.text()).trim() : null
-  // The conversation is the bird's only memory, so never quietly start a new one.
-  if (threadId === "") throw new Error(`${threadIdPath} is empty`)
+  const { threadId } = readBird(directory)
   const common = [
     "--ignore-user-config",
     "--skip-git-repo-check",
@@ -276,9 +281,11 @@ async function ask(question: string, context: Context): Promise<string> {
     child.exited,
   ])
 
+  if (startedThreadId !== null && startedThreadId.trim() === "") {
+    throw new Error("Codex reported an empty thread ID")
+  }
   if (threadId === null && startedThreadId !== null) {
-    await Bun.write(`${threadIdPath}.tmp`, startedThreadId)
-    await rename(`${threadIdPath}.tmp`, threadIdPath)
+    writeBird({ ...readBird(directory), threadId: startedThreadId })
   }
 
   // Codex diagnostics can include credentials; never log or forward them to another bird.

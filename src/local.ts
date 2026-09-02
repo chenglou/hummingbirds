@@ -3,7 +3,7 @@ import { devNull, homedir } from "os"
 import { dirname, join, resolve } from "path"
 import { httpOrigin, localOrigin, networkSettings, type Network } from "./network.ts"
 
-export type Bird = Network & { id: string; directory: string; port: number }
+export type Bird = Network & { id: string; directory: string; port: number; threadId: string | null }
 
 type Options = Partial<Network> & { port?: number; peers?: string; seed?: string }
 type Run = { pid: number; token: string }
@@ -40,12 +40,24 @@ export function readBird(directory: string): Bird {
     port: number
     host?: string
     bind?: string
+    threadId?: string | null
   }
   birdDirectory(bird.id, dirname(directory))
   if (!Number.isSafeInteger(bird.port) || bird.port < 1 || bird.port > 65_535) {
     throw new Error("Bird port must be between 1 and 65535.")
   }
-  return { ...bird, ...networkSettings(bird.host, bird.bind), directory }
+  const threadId = bird.threadId ?? null
+  // Invalid saved memory must never silently become a fresh conversation.
+  if (threadId !== null && (typeof threadId !== "string" || threadId.trim() === "")) {
+    throw new Error("Bird threadId must be a non-empty string or null.")
+  }
+  return { ...bird, ...networkSettings(bird.host, bird.bind), directory, threadId }
+}
+
+export function writeBird({ directory, ...metadata }: Bird): void {
+  const path = join(directory, "bird.json")
+  writeFileSync(`${path}.tmp`, JSON.stringify(metadata))
+  renameSync(`${path}.tmp`, path)
 }
 
 export async function createBird(directory: string, id: string, options: Options = {}): Promise<Bird> {
@@ -103,10 +115,9 @@ export async function createBird(directory: string, id: string, options: Options
         .replaceAll("[peers]", options.peers ?? "(none)")
         .replaceAll("[seed]", options.seed ?? "(none)"),
     )
-    const metadata = join(directory, "bird.json")
-    writeFileSync(`${metadata}.tmp`, JSON.stringify({ id, port, ...network }))
-    renameSync(`${metadata}.tmp`, metadata)
-    return { id, directory, port, ...network }
+    const bird = { id, directory, port, ...network, threadId: null }
+    writeBird(bird)
+    return bird
   } finally {
     await reservation.stop(true)
   }

@@ -111,8 +111,8 @@ describe("Hummingbirds", () => {
       await stream.cancel()
       stream = null
 
-      const threadIdPath = join(directory, "bird", "thread-id")
-      const threadId = await readFile(threadIdPath, "utf8")
+      const threadId = await savedThreadId(bird)
+      expect(await Bun.file(join(directory, "bird", "thread-id")).exists()).toBe(false)
 
       const port = Number(new URL(bird.url).port)
       await stopBird(bird)
@@ -130,11 +130,103 @@ describe("Hummingbirds", () => {
       await waitUntil(async () => {
         return (await events(restartedBird)).filter((event) => event.kind === "completed").length === 3
       })
-      expect(await readFile(threadIdPath, "utf8")).toBe(threadId)
+      expect(await savedThreadId(bird)).toBe(threadId)
     } finally {
       if (mirror !== null) await mirror.cancel()
       if (stream !== null) await stream.cancel()
       if (bird !== null) await stopBird(bird)
+    }
+  }, 15_000)
+
+  test.each(["matching", "conflicting", "empty", "busy", "unwritable"] as const)(
+    "migrates legacy conversation state safely when %s",
+    async (scenario) => {
+      const directory = await makeTemporaryDirectory()
+      const stateDirectory = join(directory, "bird")
+      const bird = await createBird(stateDirectory, "migration")
+      const metadataPath = join(stateDirectory, "bird.json")
+      const legacyPath = join(stateDirectory, "thread-id")
+      const threadId = crypto.randomUUID()
+      const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as { threadId: string | null }
+      switch (scenario) {
+        case "matching": metadata.threadId = threadId; break
+        case "conflicting": metadata.threadId = crypto.randomUUID(); break
+        case "empty": case "busy": case "unwritable": break
+      }
+      const original = JSON.stringify(metadata)
+      const legacy = scenario === "empty" ? " \n" : `${threadId}\n`
+      await writeFile(metadataPath, original)
+      await writeFile(legacyPath, legacy)
+      const occupied = scenario === "busy"
+        ? Bun.serve({ hostname: bird.bind, port: bird.port, fetch: () => new Response("occupied") })
+        : null
+      if (scenario === "unwritable") await mkdir(`${metadataPath}.tmp`)
+      const child = Bun.spawn([process.execPath, "run", resolve("src/server.ts")], {
+        cwd: directory,
+        env: { ...Bun.env, HUMMINGBIRDS_CODEX: fakeCodex, HUMMINGBIRDS_DIRECTORY: stateDirectory },
+        stdout: "pipe",
+        stderr: "pipe",
+      })
+
+      try {
+        if (scenario === "matching") {
+          await waitUntil(async () => !(await Bun.file(legacyPath).exists()))
+          expect(await savedThreadId({ directory })).toBe(threadId)
+          expect(JSON.parse(await readFile(metadataPath, "utf8"))).toEqual(metadata)
+        } else {
+          expect(await child.exited).not.toBe(0)
+          expect(await readFile(metadataPath, "utf8")).toBe(original)
+          expect(await readFile(legacyPath, "utf8")).toBe(legacy)
+          const stderr = await new Response(child.stderr).text()
+          if (scenario === "conflicting") expect(stderr).toContain("refer to different conversations")
+          if (scenario === "empty") expect(stderr).toContain("thread-id is empty")
+        }
+      } finally {
+        if (child.exitCode === null) child.kill()
+        await child.exited
+        if (occupied !== null) await occupied.stop(true)
+      }
+    },
+    10_000,
+  )
+
+  test("saves the first conversation even after failure without overwriting newer settings", async () => {
+    const root = await makeTemporaryDirectory()
+    const capture = join(root, "first-turn.ts")
+    const threadId = crypto.randomUUID()
+    await writeFile(capture, `#!${process.execPath}\n` +
+      `await Bun.stdin.text()\n` +
+      `const resumed = process.argv.includes("resume")\n` +
+      `console.log(JSON.stringify({ type: "thread.started", thread_id: resumed ? process.argv.at(-2) : ${JSON.stringify(threadId)} }))\n` +
+      `if (!resumed) {\n` +
+      `  await Bun.write("turn-ready", "")\n` +
+      `  while (!(await Bun.file("continue").exists())) await Bun.sleep(10)\n` +
+      `  process.exit(7)\n` +
+      `}\n`,
+    { mode: 0o700 })
+    const bird = await startBird(join(root, "first-turn"), { HUMMINGBIRDS_CODEX: capture })
+    const stateDirectory = join(bird.directory, "bird")
+    const workspace = join(stateDirectory, "workspace")
+    const metadataPath = join(stateDirectory, "bird.json")
+
+    try {
+      await send(bird, "first", opaque("failed-first"))
+      await waitUntil(async () => Bun.file(join(workspace, "turn-ready")).exists())
+      const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as object
+      await writeFile(metadataPath, JSON.stringify({ ...metadata, host: "updated.example" }))
+      await writeFile(join(workspace, "continue"), "")
+      await waitUntil(async () => (await events(bird)).some((event) => event.kind === "failed"))
+      expect(await savedThreadId(bird)).toBe(threadId)
+      expect(JSON.parse(await readFile(metadataPath, "utf8"))).toEqual({ ...metadata, host: "updated.example", threadId })
+      expect(await Bun.file(join(stateDirectory, "thread-id")).exists()).toBe(false)
+
+      await send(bird, "second", opaque("after-failed-first"))
+      await waitUntil(async () => (await events(bird)).some((event) => event.kind === "completed"))
+      expect((await events(bird)).filter((event) => event.kind === "started").map((event) => event.threadId)).toEqual([null, threadId])
+      expect(await savedThreadId(bird)).toBe(threadId)
+    } finally {
+      await writeFile(join(workspace, "continue"), "")
+      await stopBird(bird)
     }
   }, 15_000)
 
@@ -255,7 +347,7 @@ describe("Hummingbirds", () => {
         "started",
         "completed",
       ])
-      const threadId = await readFile(join(directory, "bird", "thread-id"), "utf8")
+      const threadId = await savedThreadId(bird)
       expect(turns.filter((event) => event.kind === "started").map((event) => event.threadId)).toEqual(
         [null, threadId, threadId],
       )
@@ -463,7 +555,7 @@ describe("Hummingbirds", () => {
       ])
       expect(received(await events(c), trainingRequest)).toEqual([["b", b.url, null, [a.url, b.url]]])
 
-      const firstThreadId = await readFile(join(a.directory, "bird", "thread-id"), "utf8")
+      const firstThreadId = await savedThreadId(a)
       const port = Number(new URL(a.url).port)
       await stopBird(a)
       a = await startBird(a.directory, {}, port)
@@ -487,7 +579,7 @@ describe("Hummingbirds", () => {
       ])
       expect(received(await events(b), probeRequest)).toEqual([])
       expect(received(await events(c), probeRequest)).toEqual([["a", a.url, null, [a.url]]])
-      expect(await readFile(join(a.directory, "bird", "thread-id"), "utf8")).toBe(firstThreadId)
+      expect(await savedThreadId(a)).toBe(firstThreadId)
     } finally {
       await Promise.all(birds.map(stopBird))
     }
@@ -676,7 +768,7 @@ describe("Hummingbirds", () => {
         [source, "x-request"],
         [receiver, "x-in-reply-to"],
       ] as const) {
-        const threadId = await readFile(join(bird.directory, "bird", "thread-id"), "utf8")
+        const threadId = await savedThreadId(bird)
         const session = JSON.parse(
           await readFile(join(bird.directory, "bird", "workspace", ".fake-codex", `${threadId}.json`), "utf8"),
         ) as { lastEnvelope: Record<string, string> }
@@ -712,7 +804,7 @@ describe("Hummingbirds", () => {
         )
       })
       expect(inbox.messages).toHaveLength(2)
-      const receiverThreadId = await readFile(join(receiver.directory, "bird", "thread-id"), "utf8")
+      const receiverThreadId = await savedThreadId(receiver)
       const receiverSession = JSON.parse(
         await readFile(
           join(receiver.directory, "bird", "workspace", ".fake-codex", `${receiverThreadId}.json`),
@@ -927,9 +1019,10 @@ describe("Hummingbirds", () => {
         )
       })
 
-      const threadIdPath = join(bird.directory, "bird", "thread-id")
-      const threadId = await readFile(threadIdPath, "utf8")
+      const threadId = await savedThreadId(bird)
       const stateDirectory = join(bird.directory, "bird")
+      const metadataPath = join(stateDirectory, "bird.json")
+      const metadata = JSON.parse(await readFile(metadataPath, "utf8")) as object
       const workspace = join(stateDirectory, "workspace")
       const extra = ["-m", "gpt-test", "-c", "model_auto_compact_token_limit=20000"]
       const argvPath = join(workspace, ".fake-codex", "argv.jsonl")
@@ -960,11 +1053,11 @@ describe("Hummingbirds", () => {
         ["--search", "exec", "resume", ...common, ...extra, threadId, "-"],
       ])
 
-      await writeFile(threadIdPath, "")
+      await writeFile(metadataPath, JSON.stringify({ ...metadata, threadId: "" }))
       const thirdRequest = opaque("q-third")
       await send(bird, "third", thirdRequest, inbox.url)
       await waitUntil(async () => inbox.messages.length === 3)
-      expect(inbox.messages[2]?.body).toMatch(/thread-id is empty$/)
+      expect(inbox.messages[2]?.body).toBe("Bird threadId must be a non-empty string or null.")
       expect(inbox.messages[2]?.inReplyTo).toBe(thirdRequest)
       expect(inbox.messages[2]?.request).toBeNull()
       expect(await readArgv()).toHaveLength(2)
@@ -1109,6 +1202,12 @@ async function events(bird: Pick<Bird, "directory">): Promise<Event[]> {
     .split("\n")
     .filter((line) => line !== "")
     .map((line) => JSON.parse(line) as Event)
+}
+
+async function savedThreadId(bird: Pick<Bird, "directory">): Promise<string> {
+  const { threadId } = JSON.parse(await readFile(join(bird.directory, "bird", "bird.json"), "utf8")) as { threadId: unknown }
+  if (typeof threadId !== "string" || threadId === "") throw new Error("Expected a saved conversation ID")
+  return threadId
 }
 
 function received(

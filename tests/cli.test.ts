@@ -6,6 +6,7 @@ import { cliCommand } from "../src/local.ts"
 
 type Result = { code: number; stderr: string; stdout: string }
 type Event = { kind: string }
+type Metadata = { id: string; port: number; host: string; bind: string; threadId: string | null }
 
 const fakeCodex = resolve("tests/fake-codex.ts")
 const homes: string[] = []
@@ -27,6 +28,10 @@ describe("birds", () => {
     expect(second.code).toBe(0)
     const a = await metadata(home, "a")
     expect(a.port).not.toBe(b.port)
+    expect(a).toEqual({ id: "a", port: a.port, host: "127.0.0.1", bind: "127.0.0.1", threadId: null })
+    expect(b.threadId).toBeNull()
+    expect(await Bun.file(join(home, "a", "thread-id")).exists()).toBe(false)
+    expect(await Bun.file(join(home, "b", "thread-id")).exists()).toBe(false)
     expect(await Bun.file(join(home, "a", "run.json")).exists()).toBe(false)
     expect(await Bun.file(join(home, "b", "run.json")).exists()).toBe(false)
     expect(await readFile(join(home, "a", "workspace", "AGENTS.md"), "utf8")).toContain(peers)
@@ -166,42 +171,74 @@ describe("birds", () => {
       expect((await fetch(`http://127.0.0.1:${saved.port}/control`)).status).toBe(401)
       expect((await post(saved.port, "First networked message.")).status).toBe(202)
       await waitUntil(async () => (await events(home, "networked")).some((event) => event.kind === "completed"))
-      const threadPath = join(home, "networked", "thread-id")
-      const thread = await readFile(threadPath, "utf8")
+      const thread = (await metadata(home, "networked")).threadId
+      expect(thread).toBeString()
       expect((await command(home, ["stop", "networked"], changedEnvironment)).code).toBe(0)
       expect((await command(home, ["start", "networked", "--detach"])).stdout).toContain(address)
       expect((await post(saved.port, "Second networked message.")).status).toBe(202)
       await waitUntil(async () => (await events(home, "networked")).filter((event) => event.kind === "completed").length === 2)
-      expect(await readFile(threadPath, "utf8")).toBe(thread)
+      expect(await Bun.file(join(home, "networked", "thread-id")).exists()).toBe(false)
       expect(await readFile(promptPath, "utf8")).toBe(prompt)
-      expect(await metadata(home, "networked")).toEqual(saved)
+      expect(await metadata(home, "networked")).toEqual({ ...saved, threadId: thread })
     } finally {
       await stopIfRunning(home, "networked")
     }
   })
 
-  test("keeps legacy birds on localhost without rewriting their metadata or prompt", async () => {
+  test("migrates a legacy bird's session only when starting and keeps its original prompt and localhost address", async () => {
     const home = await makeHome()
     expect((await command(home, ["new", "legacy"])).code).toBe(0)
     const { id, port } = await metadata(home, "legacy")
     const path = join(home, "legacy", "bird.json")
+    const threadPath = join(home, "legacy", "thread-id")
     const legacy = JSON.stringify({ id, port })
-    await writeFile(path, legacy)
     const promptPath = join(home, "legacy", "workspace", "AGENTS.md")
     const prompt = await readFile(promptPath, "utf8")
     try {
+      expect((await command(home, ["start", "legacy", "--detach"])).code).toBe(0)
+      expect((await post(port, "Remember this conversation before migrating.")).status).toBe(202)
+      await waitUntil(async () => (await events(home, "legacy")).some((event) => event.kind === "completed"))
+      const thread = (await metadata(home, "legacy")).threadId
+      if (thread === null) throw new Error("Expected a persisted conversation")
+      expect((await command(home, ["stop", "legacy"])).code).toBe(0)
+      await writeFile(path, legacy)
+      await writeFile(threadPath, `${thread}\n`)
+
+      expect((await command(home, ["list"])).stdout).toContain(`legacy\tstopped\thttp://127.0.0.1:${port}/ask`)
+      expect(await readFile(path, "utf8")).toBe(legacy)
+      expect(await readFile(threadPath, "utf8")).toBe(`${thread}\n`)
+
       const started = await command(home, ["start", "legacy", "--detach"], {
         BIRDS_HOST: "not-this-machine.example",
         BIRDS_BIND: "192.0.2.1",
       })
       expect(started.code).toBe(0)
       expect(started.stdout).toContain(`http://127.0.0.1:${port}/ask`)
+      expect((await metadata(home, "legacy")).threadId).toBe(thread)
+      expect(await Bun.file(threadPath).exists()).toBe(false)
       expect((await post(port, "Keep my old state.")).status).toBe(202)
-      await waitUntil(async () => (await events(home, "legacy")).some((event) => event.kind === "completed"))
-      expect(await readFile(path, "utf8")).toBe(legacy)
+      await waitUntil(async () => (await events(home, "legacy")).filter((event) => event.kind === "completed").length === 2)
+      expect(await metadata(home, "legacy")).toEqual({ id, port, host: "127.0.0.1", bind: "127.0.0.1", threadId: thread })
       expect(await readFile(promptPath, "utf8")).toBe(prompt)
     } finally {
       await stopIfRunning(home, "legacy")
+    }
+  })
+
+  test("rejects invalid saved thread IDs without starting a fresh conversation or changing state", async () => {
+    const home = await makeHome()
+    expect((await command(home, ["new", "invalid"])).code).toBe(0)
+    const saved = await metadata(home, "invalid")
+    const directory = join(home, "invalid")
+    const path = join(directory, "bird.json")
+    for (const threadId of ["", "   ", 42, false, {}]) {
+      const invalid = JSON.stringify({ ...saved, threadId })
+      await writeFile(path, invalid)
+      expect((await command(home, ["start", "invalid", "--detach"])).code).not.toBe(0)
+      expect(await readFile(path, "utf8")).toBe(invalid)
+      expect(await Bun.file(join(directory, "run.json")).exists()).toBe(false)
+      expect(await Bun.file(join(directory, "thread-id")).exists()).toBe(false)
+      expect(await events(home, "invalid")).toEqual([])
     }
   })
 
@@ -262,7 +299,8 @@ describe("birds", () => {
       expect((await command(home, ["start", "memory", "--detach"])).code).not.toBe(0)
       expect((await post(port, "Remember the first message.")).status).toBe(202)
       await waitUntil(async () => (await events(home, "memory")).some((event) => event.kind === "completed"))
-      const thread = await readFile(join(home, "memory", "thread-id"), "utf8")
+      const thread = (await metadata(home, "memory")).threadId
+      expect(thread).toBeString()
 
       expect((await command(home, ["stop", "memory"])).code).toBe(0)
       await foreground.exited
@@ -275,7 +313,8 @@ describe("birds", () => {
       await waitUntil(async () => {
         return (await events(home, "memory")).filter((event) => event.kind === "completed").length === 2
       })
-      expect(await readFile(join(home, "memory", "thread-id"), "utf8")).toBe(thread)
+      expect((await metadata(home, "memory")).threadId).toBe(thread)
+      expect(await Bun.file(join(home, "memory", "thread-id")).exists()).toBe(false)
 
       let output = ""
       const decoder = new TextDecoder()
@@ -370,8 +409,8 @@ describe("birds", () => {
       expect((await command(home, ["stop", "blocked"])).code).toBe(0)
       expect(performance.now() - stoppingAt).toBeLessThan(2_000)
       expect(await events(home, "blocked")).toEqual([])
+      expect((await metadata(home, "blocked")).threadId).toBeNull()
       expect(await Bun.file(join(home, "blocked", "thread-id")).exists()).toBe(false)
-      expect(await Bun.file(join(home, "blocked", "bird.json")).exists()).toBe(true)
     } finally {
       if (unfinished !== null) {
         unfinished.cancel()
@@ -406,7 +445,8 @@ describe("birds", () => {
     try {
       expect((await post(parent.port, "Remember the parent's own conversation.")).status).toBe(202)
       await waitUntil(async () => (await events(home, "parent")).some((event) => event.kind === "completed"))
-      const parentThread = await readFile(join(home, "parent", "thread-id"), "utf8")
+      const parentThread = (await metadata(home, "parent")).threadId
+      expect(parentThread).toBeString()
 
       expect((await command(home, ["new", "sprout"])).code).toBe(0)
       const child = await metadata(home, "sprout")
@@ -416,6 +456,7 @@ describe("birds", () => {
       expect(prompt).not.toContain("--peer")
       expect(prompt).toContain("After splitting, tell each child about the peers you think are relevant to its work, including their IDs, addresses, and what you know about them.")
       expect(prompt).not.toContain("PARENT-ONLY-FACT-71")
+      expect(child.threadId).toBeNull()
       expect(await Bun.file(join(home, "sprout", "thread-id")).exists()).toBe(false)
       expect(await readdir(join(home, "sprout", "workspace"))).toEqual(["AGENTS.md"])
       expect((await command(home, ["start", "sprout", "--detach"])).code).toBe(0)
@@ -425,6 +466,7 @@ describe("birds", () => {
       const grandchildPrompt = await readFile(join(home, "twig", "workspace", "AGENTS.md"), "utf8")
       expect(grandchildPrompt).toContain("Your initial peers are:\n(none)")
       expect(grandchildPrompt).not.toContain("PARENT-ONLY-FACT-71")
+      expect(grandchild.threadId).toBeNull()
       expect(await Bun.file(join(home, "twig", "thread-id")).exists()).toBe(false)
       expect((await command(home, ["start", "twig", "--detach"])).code).toBe(0)
 
@@ -434,8 +476,10 @@ describe("birds", () => {
       ])
       await waitUntil(async () => (await events(home, "sprout")).some((event) => event.kind === "completed"))
       await waitUntil(async () => (await events(home, "twig")).some((event) => event.kind === "completed"))
-      const childThread = await readFile(join(home, "sprout", "thread-id"), "utf8")
-      const grandchildThread = await readFile(join(home, "twig", "thread-id"), "utf8")
+      const childThread = (await metadata(home, "sprout")).threadId
+      const grandchildThread = (await metadata(home, "twig")).threadId
+      expect(childThread).toBeString()
+      expect(grandchildThread).toBeString()
       expect(childThread).not.toBe(parentThread)
       expect(grandchildThread).not.toBe(parentThread)
       expect(childThread).not.toBe(grandchildThread)
@@ -468,8 +512,10 @@ describe("birds", () => {
       expect(replies).toHaveLength(2)
       await waitUntil(async () => (await events(home, "sprout")).filter((event) => event.kind === "completed").length === 2)
       await waitUntil(async () => (await events(home, "twig")).filter((event) => event.kind === "completed").length === 2)
-      expect(await readFile(join(home, "sprout", "thread-id"), "utf8")).toBe(childThread)
-      expect(await readFile(join(home, "twig", "thread-id"), "utf8")).toBe(grandchildThread)
+      expect((await metadata(home, "sprout")).threadId).toBe(childThread)
+      expect((await metadata(home, "twig")).threadId).toBe(grandchildThread)
+      expect(await Bun.file(join(home, "sprout", "thread-id")).exists()).toBe(false)
+      expect(await Bun.file(join(home, "twig", "thread-id")).exists()).toBe(false)
       expect((await command(home, ["list"])).stdout).toContain("sprout\trunning\t")
     } finally {
       await Promise.all(["twig", "sprout", "parent"].map((id) => stopIfRunning(home, id)))
@@ -516,8 +562,8 @@ async function command(
   return { code, stdout, stderr }
 }
 
-async function metadata(home: string, id: string): Promise<{ id: string; port: number; host: string; bind: string }> {
-  return JSON.parse(await readFile(join(home, id, "bird.json"), "utf8")) as { id: string; port: number; host: string; bind: string }
+async function metadata(home: string, id: string): Promise<Metadata> {
+  return JSON.parse(await readFile(join(home, id, "bird.json"), "utf8")) as Metadata
 }
 
 async function events(home: string, id: string): Promise<Event[]> {

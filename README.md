@@ -56,7 +56,7 @@ Birds can create children with these same commands and teach them through messag
 
 ## State and development
 
-Bird state lives in `~/.birds/<id>/` (`BIRDS_HOME` to override). Prompts aren't regenerated on restart; update `workspace/AGENTS.md` after changing the template or moving the installation. Older birds without network settings stay on localhost.
+Bird state lives in `~/.birds/<id>/` (`BIRDS_HOME` to override); `bird.json` holds its settings and conversation ID. Prompts aren't regenerated on restart; update `workspace/AGENTS.md` after changing the template or moving the installation. Older birds without network settings stay on localhost; old `thread-id` files migrate on start.
 
 Back up both the bird directories and `~/.codex/` (`CODEX_HOME` to override). The thread ID alone cannot restore a conversation. Codex home also contains login credentials.
 
