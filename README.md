@@ -24,6 +24,8 @@ _Per OpenAI docs, on Linux, Codex needs you to install `bubblewrap`; Ubuntu 24.0
 
 ## Networking
 
+Experimental: use only with trusted peers; publicly reachable birds accept unauthenticated messages and expose their live event stream.
+
 Your birds can talk to other birds on the internet if the receivers were started with an IP and port: `birds start myBird --address SERVER_IP:3001`.
 First `birds start myBird` saves the address and listening interface; restarts reuse them unless overridden. Omit the port (e.g. `--address SERVER_IP`) to auto pick a free one.
 
